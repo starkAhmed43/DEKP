@@ -79,6 +79,15 @@ def _coerce_feature_tensor(value, dtype: torch.dtype) -> torch.Tensor:
     return tensor.reshape(-1).to(dtype=dtype)
 
 
+def _cleanup_torch_memory(device: torch.device | str | None = None) -> None:
+    gc.collect()
+    if device is None:
+        return
+    device_str = str(device)
+    if device_str.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _canonical_pdb_identity(pdb_type, pdb_source, pdb_record, structure_id, protein_id):
     pdb_type_value = str(pdb_type or "").strip().lower()
     pdb_source_value = str(pdb_source or "").strip().lower()
@@ -421,8 +430,26 @@ def _finalize_structure_payload(path: Path, payload: dict, entry: dict, args, le
         payload["dssp"] = tensor
         feature_dims["dssp"] = int(tensor.numel())
 
-    _atomic_torch_save(path, payload)
-    return feature_dims
+    try:
+        _atomic_torch_save(path, payload)
+        return feature_dims
+    finally:
+        # Structure graphs can be large; drop them as soon as the cache file exists.
+        payload.pop("graph", None)
+        payload.pop("pst", None)
+        payload.pop("dssp", None)
+
+
+def _make_structure_payload(entry: dict) -> dict:
+    return {
+        "structure_id": entry["structure_id"],
+        "protein_id": entry["protein_id"],
+    }
+
+
+def _maybe_cleanup_torch_memory(processed_count: int, interval: int, device: torch.device | str | None = None) -> None:
+    if interval > 0 and processed_count % interval == 0:
+        _cleanup_torch_memory(device)
 
 
 def _iter_unique_rows(jobs, column_names):
@@ -490,31 +517,48 @@ def _save_protein_payloads(unique_sequences, cache_dir: Path, protein_tokenizer:
         path = protein_cache_path(cache_dir, entry["sequence"], max_len=args.protein_max_len)
         if path.exists() and not args.overwrite:
             continue
-        payload = {
-            "sequence": entry["sequence"],
-            "protein_id": entry["protein_id"],
-            "token_ids": torch.tensor(
-                protein_tokenizer.encode(entry["sequence"], max_length=args.protein_max_len, add_special_tokens=True),
-                dtype=torch.long,
-            ),
-        }
         if "t5" in args.feature_list:
             legacy_value = resolve_legacy_feature(legacy.get("t5"), entry["protein_id"], entry["sequence"])
             if legacy_value is not None:
+                payload = {
+                    "sequence": entry["sequence"],
+                    "protein_id": entry["protein_id"],
+                    "token_ids": torch.tensor(
+                        protein_tokenizer.encode(entry["sequence"], max_length=args.protein_max_len, add_special_tokens=True),
+                        dtype=torch.long,
+                    ),
+                }
                 tensor = _coerce_feature_tensor(legacy_value, dtype=dtype)
                 payload["t5"] = tensor
                 feature_dims["t5"] = int(tensor.numel())
+                _atomic_torch_save(path, payload)
+                written += 1
             else:
-                pending_t5.append((entry, path, payload))
+                pending_t5.append(
+                    {
+                        "sequence": entry["sequence"],
+                        "protein_id": entry["protein_id"],
+                        "path": path,
+                    }
+                )
                 continue
-        _atomic_torch_save(path, payload)
-        written += 1
+        else:
+            payload = {
+                "sequence": entry["sequence"],
+                "protein_id": entry["protein_id"],
+                "token_ids": torch.tensor(
+                    protein_tokenizer.encode(entry["sequence"], max_length=args.protein_max_len, add_special_tokens=True),
+                    dtype=torch.long,
+                ),
+            }
+            _atomic_torch_save(path, payload)
+            written += 1
 
     if pending_t5:
         device = torch.device(args.device)
         _log(f"ProtT5 phase: loading model on {device}", args.verbose)
         model, tokenizer = load_prot_t5(args.prot_t5_model, device=device)
-        sequences = [item[0]["sequence"] for item in pending_t5]
+        sequences = [item["sequence"] for item in pending_t5]
         _log(f"ProtT5 phase: {len(sequences)} sequences require direct computation", args.verbose)
         batches = build_prot_t5_batches(
             sequences,
@@ -523,16 +567,34 @@ def _save_protein_payloads(unique_sequences, cache_dir: Path, protein_tokenizer:
             max_batch=args.prot_t5_max_batch,
         )
         _log(f"ProtT5 phase: {len(batches)} batches", args.verbose)
-        batch_lookup = {sequence: (entry, path, payload) for entry, path, payload in pending_t5 for sequence in [entry["sequence"]]}
+        batch_lookup = {item["sequence"]: item for item in pending_t5}
         for batch in tqdm(batches, desc="Caching ProtT5", unit="batch"):
             embedded = embed_prot_t5_batch(model, tokenizer, batch, device)
             for sequence in batch:
-                entry, path, payload = batch_lookup[sequence]
+                item = batch_lookup[sequence]
+                payload = {
+                    "sequence": sequence,
+                    "protein_id": item["protein_id"],
+                    "token_ids": torch.tensor(
+                        protein_tokenizer.encode(sequence, max_length=args.protein_max_len, add_special_tokens=True),
+                        dtype=torch.long,
+                    ),
+                }
                 tensor = torch.as_tensor(embedded[sequence], dtype=dtype)
                 payload["t5"] = tensor
                 feature_dims["t5"] = int(tensor.numel())
-                _atomic_torch_save(path, payload)
+                _atomic_torch_save(item["path"], payload)
                 written += 1
+                del payload
+                del tensor
+            del embedded
+            _cleanup_torch_memory(device)
+        del model
+        del tokenizer
+        del batch_lookup
+        del batches
+        del sequences
+        _cleanup_torch_memory(device)
 
     return written, feature_dims
 
@@ -552,14 +614,7 @@ def _save_ligand_payloads(unique_smiles, cache_dir: Path, smiles_tokenizer: Rege
         path = ligand_cache_path(cache_dir, entry["smiles"])
         if path.exists() and not args.overwrite:
             continue
-        payload = {
-            "smiles": entry["smiles"],
-            "cid": entry.get("cid"),
-            "token_ids": torch.tensor(
-                smiles_tokenizer.encode(entry["smiles"], max_length=args.smiles_max_len, add_special_tokens=True),
-                dtype=torch.long,
-            ),
-        }
+        payload = None
         if "trfm" in args.feature_list:
             legacy_value = None
             if legacy.get("trfm") is not None:
@@ -569,12 +624,23 @@ def _save_ligand_payloads(unique_smiles, cache_dir: Path, smiles_tokenizer: Rege
                 if legacy_value is None:
                     legacy_value = resolve_legacy_feature(legacy.get("trfm"), entry["smiles"])
             if legacy_value is not None:
+                payload = {
+                    "smiles": entry["smiles"],
+                    "cid": entry.get("cid"),
+                    "token_ids": torch.tensor(
+                        smiles_tokenizer.encode(entry["smiles"], max_length=args.smiles_max_len, add_special_tokens=True),
+                        dtype=torch.long,
+                    ),
+                }
                 tensor = _coerce_feature_tensor(legacy_value, dtype=dtype)
                 payload["trfm"] = tensor
                 feature_dims["trfm"] = int(tensor.numel())
             else:
-                pending_trfm.append((entry, path, payload))
-                pending_lookup[entry["smiles"]] = (entry, path, payload)
+                pending_trfm.append(entry["smiles"])
+                pending_lookup[entry["smiles"]] = {
+                    "cid": entry.get("cid"),
+                    "path": path,
+                }
         if "molformer" in args.feature_list:
             legacy_value = None
             if legacy.get("molformer") is not None:
@@ -588,10 +654,28 @@ def _save_ligand_payloads(unique_smiles, cache_dir: Path, smiles_tokenizer: Rege
                     "Requested `molformer` features but no usable legacy molformer.pkl entry was available. "
                     "Provide --legacy_feature_dir with molformer.pkl or remove molformer from --feature_list."
                 )
+            if payload is None:
+                payload = {
+                    "smiles": entry["smiles"],
+                    "cid": entry.get("cid"),
+                    "token_ids": torch.tensor(
+                        smiles_tokenizer.encode(entry["smiles"], max_length=args.smiles_max_len, add_special_tokens=True),
+                        dtype=torch.long,
+                    ),
+                }
             tensor = _coerce_feature_tensor(legacy_value, dtype=dtype)
             payload["molformer"] = tensor
             feature_dims["molformer"] = int(tensor.numel())
-        if "trfm" not in args.feature_list or "trfm" in payload:
+        if payload is None and "trfm" not in args.feature_list:
+            payload = {
+                "smiles": entry["smiles"],
+                "cid": entry.get("cid"),
+                "token_ids": torch.tensor(
+                    smiles_tokenizer.encode(entry["smiles"], max_length=args.smiles_max_len, add_special_tokens=True),
+                    dtype=torch.long,
+                ),
+            }
+        if payload is not None and ("trfm" not in args.feature_list or "trfm" in payload):
             _atomic_torch_save(path, payload)
             written += 1
 
@@ -603,18 +687,34 @@ def _save_ligand_payloads(unique_smiles, cache_dir: Path, smiles_tokenizer: Rege
             vocab_path=args.trfm_vocab_path,
             device=device,
         )
-        smiles_values = [entry["smiles"] for entry, _, _ in pending_trfm]
+        smiles_values = list(pending_trfm)
         _log(f"SMILES Transformer phase: {len(smiles_values)} SMILES require direct computation", args.verbose)
         for start in tqdm(range(0, len(smiles_values), args.trfm_batch_size), desc="Caching TRFM", unit="batch"):
             batch_smiles = smiles_values[start : start + args.trfm_batch_size]
             embedded = embed_smiles_trfm_batch(batch_smiles, model=model, vocab=vocab, device=device)
             for smiles in batch_smiles:
-                entry, path, payload = pending_lookup[smiles]
+                item = pending_lookup[smiles]
+                payload = {
+                    "smiles": smiles,
+                    "cid": item["cid"],
+                    "token_ids": torch.tensor(
+                        smiles_tokenizer.encode(smiles, max_length=args.smiles_max_len, add_special_tokens=True),
+                        dtype=torch.long,
+                    ),
+                }
                 tensor = torch.as_tensor(embedded[smiles], dtype=dtype)
                 payload["trfm"] = tensor
                 feature_dims["trfm"] = int(tensor.numel())
-                _atomic_torch_save(path, payload)
+                _atomic_torch_save(item["path"], payload)
                 written += 1
+                del payload
+                del tensor
+            del embedded
+            _cleanup_torch_memory(device)
+        del model
+        del vocab
+        del smiles_values
+        _cleanup_torch_memory(device)
 
     return written, feature_dims
 
@@ -633,10 +733,7 @@ def _save_structure_payloads(unique_structures, cache_dir: Path, args, legacy):
         path = structure_cache_path(cache_dir, structure_id=entry["structure_id"], fallback_sequence=entry["sequence"])
         if not args.overwrite and str(path) in existing_structure_cache:
             continue
-        payload = {
-            "structure_id": entry["structure_id"],
-            "protein_id": entry["protein_id"],
-        }
+        payload = _make_structure_payload(entry)
 
         legacy_graph = resolve_legacy_feature(legacy.get("graph"), entry["protein_id"], entry["structure_id"])
         if legacy_graph is not None:
@@ -644,6 +741,7 @@ def _save_structure_payloads(unique_structures, cache_dir: Path, args, legacy):
             current_dims = _finalize_structure_payload(path, payload, entry, args, legacy, dtype)
             feature_dims.update(current_dims)
             written += 1
+            del payload
         else:
             pdb_path = _resolve_pdb_path(entry, args)
             if pdb_path is None:
@@ -660,7 +758,6 @@ def _save_structure_payloads(unique_structures, cache_dir: Path, args, legacy):
                     "graph_neighbors": args.graph_neighbors,
                     "graph_atom_type": args.graph_atom_type,
                     "path": path,
-                    "payload": payload,
                     "entry": entry,
                 }
             )
@@ -669,12 +766,14 @@ def _save_structure_payloads(unique_structures, cache_dir: Path, args, legacy):
         if use_gpu_graphs:
             parse_workers = max(1, int(args.graph_parse_workers))
             prefetch_limit = max(1, int(args.graph_prefetch))
+            cleanup_interval = max(0, int(args.graph_cleanup_interval))
             _log(
-                f"Building {len(graph_tasks)} structure graphs on {graph_device} with {parse_workers} CPU parse threads and prefetch={prefetch_limit}",
+                f"Building {len(graph_tasks)} structure graphs on {graph_device} with {parse_workers} CPU parse threads, prefetch={prefetch_limit}, cleanup_interval={cleanup_interval}",
                 args.verbose,
             )
             task_iter = iter(graph_tasks)
             pending = {}
+            processed = 0
             with ThreadPoolExecutor(max_workers=parse_workers) as pool:
                 def submit_until_full():
                     while len(pending) < prefetch_limit:
@@ -692,25 +791,27 @@ def _save_structure_payloads(unique_structures, cache_dir: Path, args, legacy):
                         task = pending.pop(future)
                         try:
                             result = future.result()
+                            payload = _make_structure_payload(task["entry"])
                             graph = build_graph_from_array(
                                 result["pdb_array"],
                                 nneighbor=args.graph_neighbors,
                                 device=graph_device,
                             )
-                            task["payload"]["graph"] = graph
-                            current_dims = _finalize_structure_payload(task["path"], task["payload"], task["entry"], args, legacy, dtype)
+                            payload["graph"] = graph
+                            current_dims = _finalize_structure_payload(task["path"], payload, task["entry"], args, legacy, dtype)
                             feature_dims.update(current_dims)
                             written += 1
+                            del payload
                             del graph
                             del result
-                            if torch.cuda.is_available() and graph_device.startswith("cuda"):
-                                torch.cuda.empty_cache()
                         except Exception as exc:
                             skipped += 1
                             print(f"Skipping structure `{task['entry']['structure_id']}` because graph build failed for {task['pdb_path']}: {exc}", flush=True)
-                        gc.collect()
+                        processed += 1
+                        _maybe_cleanup_torch_memory(processed, cleanup_interval, graph_device)
                         progress.update(1)
                         submit_until_full()
+            _cleanup_torch_memory(graph_device)
         else:
             max_workers = min(len(graph_tasks), os.cpu_count() or 1)
             _log(f"Building {len(graph_tasks)} structure graphs with up to {max_workers} CPU workers", args.verbose)
@@ -723,10 +824,13 @@ def _save_structure_payloads(unique_structures, cache_dir: Path, args, legacy):
                     task = futures[future]
                     try:
                         result = future.result()
-                        task["payload"]["graph"] = result["graph"]
-                        current_dims = _finalize_structure_payload(task["path"], task["payload"], task["entry"], args, legacy, dtype)
+                        payload = _make_structure_payload(task["entry"])
+                        payload["graph"] = result["graph"]
+                        current_dims = _finalize_structure_payload(task["path"], payload, task["entry"], args, legacy, dtype)
                         feature_dims.update(current_dims)
                         written += 1
+                        del payload
+                        del result
                     except Exception as exc:
                         skipped += 1
                         print(f"Skipping structure `{task['entry']['structure_id']}` because graph build failed for {task['pdb_path']}: {exc}", flush=True)
@@ -768,8 +872,9 @@ def main():
     parser.add_argument("--trfm_batch_size", type=int, default=256)
     parser.add_argument("--graph_neighbors", type=int, default=32)
     parser.add_argument("--graph_atom_type", type=str, default="CA")
-    parser.add_argument("--graph_parse_workers", type=int, default=max(1, min(4, os.cpu_count() or 1)))
-    parser.add_argument("--graph_prefetch", type=int, default=8)
+    parser.add_argument("--graph_parse_workers", type=int, default=None)
+    parser.add_argument("--graph_prefetch", type=int, default=None)
+    parser.add_argument("--graph_cleanup_interval", type=int, default=64)
     parser.add_argument("--dssp_executable", type=str, default=None)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
@@ -784,6 +889,17 @@ def main():
     if str(args.graph_device).startswith("cuda") and not torch.cuda.is_available():
         _log(f"Requested graph_device={args.graph_device} but CUDA is unavailable; falling back to cpu", True)
         args.graph_device = "cpu"
+    cpu_count = os.cpu_count() or 1
+    if args.graph_parse_workers is None:
+        if str(args.graph_device).startswith("cuda"):
+            args.graph_parse_workers = max(2, min(8, cpu_count))
+        else:
+            args.graph_parse_workers = max(1, min(4, cpu_count))
+    if args.graph_prefetch is None:
+        if str(args.graph_device).startswith("cuda"):
+            args.graph_prefetch = max(16, args.graph_parse_workers * 4)
+        else:
+            args.graph_prefetch = max(4, args.graph_parse_workers)
     args._pdb_indexes = _build_pdb_indexes(args)
     args.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -821,6 +937,8 @@ def main():
     started = time.time()
     if use_full_dataset:
         unique_sequences, unique_smiles, unique_structures, max_protein_len, max_smiles_len = _iter_unique_rows_from_frame(frame, column_names)
+        del frame
+        gc.collect()
     else:
         unique_sequences, unique_smiles, unique_structures, max_protein_len, max_smiles_len = _iter_unique_rows(jobs, column_names)
     args.protein_max_len = max(args.protein_max_len, max_protein_len)
