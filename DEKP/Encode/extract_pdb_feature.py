@@ -26,6 +26,16 @@ def calculate_distances(atom_coordinates, query_position):
     distances = np.linalg.norm(atom_coordinates - query_position, axis=1)
     return distances
 
+
+def _coerce_coord(coord, fillna):
+    try:
+        arr = np.asarray(coord, dtype=np.float32)
+    except Exception:
+        return fillna
+    if arr.shape != (3,) or not np.all(np.isfinite(arr)):
+        return fillna
+    return arr
+
 def parse_pdb(pdb_file, pos=None, atom_type='CA', nneighbor=32, cal_cb=True):
     current_pos = -1000
     X = []
@@ -61,7 +71,12 @@ def parse_pdb(pdb_file, pos=None, atom_type='CA', nneighbor=32, cal_cb=True):
                         O_coord = current_aa["O"]
                     except:
                         O_coord = fillna
-                    if len(np.array([N_coord, CA_coord, C_coord, O_coord, R_group]).shape) < 2:
+                    N_coord = _coerce_coord(N_coord, fillna)
+                    CA_coord = _coerce_coord(CA_coord, fillna)
+                    C_coord = _coerce_coord(C_coord, fillna)
+                    O_coord = _coerce_coord(O_coord, fillna)
+                    R_group = _coerce_coord(R_group, fillna)
+                    if any(coord.shape != (3,) for coord in [N_coord, CA_coord, C_coord, O_coord, R_group]):
                         X.append(np.zeros((5,3))) # For broken residue
                     else:
                         X.append([N_coord, CA_coord, C_coord, O_coord, R_group])
@@ -124,8 +139,8 @@ def _get_angle(X, eps=1e-7):
     u_0 = U[2:]
 
     # Backbone normals
-    n_2 = F.normalize(torch.cross(u_2, u_1), dim=-1)
-    n_1 = F.normalize(torch.cross(u_1, u_0), dim=-1)
+    n_2 = F.normalize(torch.linalg.cross(u_2, u_1, dim=-1), dim=-1)
+    n_1 = F.normalize(torch.linalg.cross(u_1, u_0, dim=-1), dim=-1)
 
     # Angle between normals
     cosD = torch.sum(n_2 * n_1, -1)
@@ -188,8 +203,8 @@ def _get_direction_orientation(X, edge_index): # N, CA, C, O, R, CB
     u = F.normalize(X_Ca - X_N, dim=-1)
     v = F.normalize(X_C - X_Ca, dim=-1)
     b = F.normalize(u - v, dim=-1)
-    n = F.normalize(torch.cross(u, v), dim=-1)
-    Q = torch.stack([b, n, torch.cross(b, n)], dim=-1) # [L, 3, 3] (3 column vectors)
+    n = F.normalize(torch.linalg.cross(u, v, dim=-1), dim=-1)
+    Q = torch.stack([b, n, torch.linalg.cross(b, n, dim=-1)], dim=-1) # [L, 3, 3] (3 column vectors)
 
     node_j, node_i = edge_index
 

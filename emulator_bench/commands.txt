@@ -1,0 +1,87 @@
+python emulator_bench/cache_embeddings.py \
+  --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
+  --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
+  --dataset_df_path ~/github/EMULaToR/data/processed/baselines/DEKP/km_kinetic_params_3d.parquet \
+  --feature_list trfm,t5 \
+  --experimental_pdb_dir ~/github/EMULaToR/data/intermediate/processed_exp_pdb \
+  --alphafold_pdb_dir ~/github/EMULaToR/data/intermediate/alphafold \
+  --esm3_pdb_dir ~/github/EMULaToR/data/intermediate/esm \
+  --device cuda:0
+
+python emulator_bench/train_single_target_tvt.py \
+  --train_path ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits/train.parquet \
+  --val_path ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits/val.parquet \
+  --test_path ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits/test.parquet \
+  --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
+  --out_dir ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits/dekp_results/seed_3407 \
+  --feature_list trfm,t5 \
+  --batch_size 128 \
+  --epochs 80 \
+  --device cuda:0 \
+  --num_workers 8 \
+  --prefetch_factor 4 \
+  --pin_memory \
+  --persistent_workers
+
+python emulator_bench/run_split_benchmarks.py \
+  --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
+  --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
+  --feature_list trfm,t5 \
+  --experimental_pdb_dir /path/to/experimental_pdbs \
+  --alphafold_pdb_dir /path/to/alphafold_pdbs \
+  --esm3_pdb_dir /path/to/esm3_pdbs \
+  --seeds 3407 \
+  --device cuda:0 \
+  --num_workers 8 \
+  --prefetch_factor 4 \
+  --pin_memory \
+  --persistent_workers
+
+python emulator_bench/tune_optuna.py \
+  --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
+  --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
+  --feature_list trfm,t5 \
+  --experimental_pdb_dir /path/to/experimental_pdbs \
+  --alphafold_pdb_dir /path/to/alphafold_pdbs \
+  --esm3_pdb_dir /path/to/esm3_pdbs \
+  --metric rmse \
+  --eval_split val \
+  --epochs 40 \
+  --n_trials 20 \
+  --device cuda:0 \
+  --num_workers 8 \
+  --prefetch_factor 4 \
+  --pin_memory \
+  --persistent_workers \
+  --storage sqlite:////tmp/dekp_optuna.db
+
+python emulator_bench/launch_parallel_optuna.py \
+  --gpus 0 1 \
+  --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
+  --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
+  --feature_list trfm,t5 \
+  --experimental_pdb_dir /path/to/experimental_pdbs \
+  --alphafold_pdb_dir /path/to/alphafold_pdbs \
+  --esm3_pdb_dir /path/to/esm3_pdbs \
+  --metric rmse \
+  --eval_split val \
+  --epochs 40 \
+  --n_trials 40 \
+  --storage sqlite:////tmp/dekp_optuna.db \
+  --pin_memory \
+  --persistent_workers
+
+python emulator_bench/launch_parallel_retrain_from_optuna.py \
+  --gpus 0 1 \
+  --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
+  --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
+  --feature_list trfm,t5 \
+  --experimental_pdb_dir /path/to/experimental_pdbs \
+  --alphafold_pdb_dir /path/to/alphafold_pdbs \
+  --esm3_pdb_dir /path/to/esm3_pdbs \
+  --epochs 80 \
+  --study_name dekp_optuna \
+  --storage sqlite:////tmp/dekp_optuna.db \
+  --seeds 3407 \
+  --pin_memory \
+  --persistent_workers

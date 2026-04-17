@@ -1,0 +1,442 @@
+import argparse
+import copy
+import json
+import math
+import sys
+import time
+from contextlib import nullcontext
+from pathlib import Path
+
+import pandas as pd
+import torch
+from torch.nn.utils import clip_grad_norm_
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, ReduceLROnPlateau, SequentialLR
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from emulator_bench.common import (
+    COMMON_PROTEIN_ID_COLS,
+    COMMON_SEQUENCE_COLS,
+    COMMON_SMILES_COLS,
+    COMMON_TARGET_COLS,
+    COMMON_STRUCTURE_ID_COLS,
+    DEFAULT_BASE_DIR,
+    DEFAULT_CACHE_DIR,
+    DEFAULT_FEATURES,
+    append_csv_row,
+    find_first_existing_column,
+    load_json,
+    read_table,
+    regression_metrics,
+    resolve_single_split_job,
+    save_json,
+    set_seed,
+    write_csv,
+)
+from emulator_bench.dataset import CachedDEKPDataset, LigandEmbeddingStore, ProteinEmbeddingStore, StructureEmbeddingStore
+from emulator_bench.modeling import MetaDecoder, graph_collate_fn
+
+
+def _resolve_amp(device: torch.device):
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return None, "fp32"
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    major, _ = torch.cuda.get_device_capability(index)
+    if major >= 8:
+        return torch.bfloat16, "bf16"
+    return torch.float16, "fp16"
+
+
+def _autocast_context(device: torch.device, amp_dtype):
+    if device.type == "cuda" and amp_dtype is not None:
+        return torch.autocast(device_type="cuda", dtype=amp_dtype)
+    return nullcontext()
+
+
+def _build_scheduler(optimizer, args):
+    if args.scheduler == "none":
+        return None
+    if args.scheduler == "plateau":
+        return ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=args.lr_decay_factor,
+            patience=args.lr_decay_patience,
+            min_lr=args.min_lr,
+        )
+    if args.scheduler == "cosine":
+        warmup_epochs = max(0, min(int(args.lr_warmup_epochs), int(args.epochs) - 1))
+        cosine_epochs = max(1, int(args.epochs) - warmup_epochs)
+        cosine = CosineAnnealingLR(optimizer, T_max=cosine_epochs, eta_min=float(args.min_lr))
+        if warmup_epochs == 0:
+            return cosine
+        warmup = LinearLR(
+            optimizer,
+            start_factor=float(args.lr_warmup_start_factor),
+            end_factor=1.0,
+            total_iters=max(1, warmup_epochs),
+        )
+        return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+    raise ValueError(f"Unsupported scheduler: {args.scheduler}")
+
+
+def _resolve_columns(frame: pd.DataFrame, manifest: dict, args):
+    resolved = manifest.get("resolved_columns", {})
+    return {
+        "sequence_col": find_first_existing_column(frame, COMMON_SEQUENCE_COLS, explicit=args.sequence_col or resolved.get("sequence_col"), required=True),
+        "smiles_col": find_first_existing_column(frame, COMMON_SMILES_COLS, explicit=args.smiles_col or resolved.get("smiles_col"), required=True),
+        "protein_id_col": find_first_existing_column(frame, COMMON_PROTEIN_ID_COLS, explicit=args.protein_id_col or resolved.get("protein_id_col"), required=False),
+        "structure_id_col": find_first_existing_column(frame, COMMON_STRUCTURE_ID_COLS, explicit=args.structure_id_col or resolved.get("structure_id_col"), required=False),
+        "target_col": find_first_existing_column(frame, COMMON_TARGET_COLS, explicit=args.target_col or resolved.get("target_col"), required=True),
+    }
+
+
+def _make_loader(dataset, batch_size, shuffle, args):
+    kwargs = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": args.num_workers,
+        "pin_memory": args.pin_memory,
+        "collate_fn": graph_collate_fn,
+        "drop_last": False,
+    }
+    if args.num_workers > 0:
+        kwargs["persistent_workers"] = args.persistent_workers
+        kwargs["prefetch_factor"] = args.prefetch_factor
+    return DataLoader(**kwargs)
+
+
+def _move_batch(graph_batch, protein_tokens, smiles_tokens, features, labels, device):
+    graph_batch = graph_batch.to(device)
+    protein_tokens = protein_tokens.to(device, non_blocking=True)
+    smiles_tokens = smiles_tokens.to(device, non_blocking=True)
+    features = features.to(device, non_blocking=True)
+    labels = labels.to(device, non_blocking=True)
+    return graph_batch, protein_tokens, smiles_tokens, features, labels
+
+
+def evaluate(model, loader, device, amp_dtype):
+    model.eval()
+    mse_loss = torch.nn.MSELoss(reduction="mean")
+    total_loss = 0.0
+    total_examples = 0
+    preds, labels, metadata_rows = [], [], []
+
+    with torch.no_grad():
+        for graph_batch, protein_tokens, smiles_tokens, features, label_tensor, metadata in loader:
+            graph_batch, protein_tokens, smiles_tokens, features, label_tensor = _move_batch(
+                graph_batch, protein_tokens, smiles_tokens, features, label_tensor, device
+            )
+            with _autocast_context(device, amp_dtype):
+                outputs = model(graph_batch, protein_tokens, smiles_tokens, features)
+                loss = mse_loss(outputs, label_tensor)
+
+            batch_size = int(label_tensor.numel())
+            total_loss += float(loss.item()) * batch_size
+            total_examples += batch_size
+            preds.extend(outputs.detach().float().cpu().tolist())
+            labels.extend(label_tensor.detach().float().cpu().tolist())
+            metadata_rows.extend(metadata)
+
+    metrics = regression_metrics(labels, preds)
+    metrics["loss"] = total_loss / max(1, total_examples)
+    return metrics, preds, labels, metadata_rows
+
+
+def _save_checkpoint(path: Path, model, optimizer, scheduler, epoch: int, args, manifest: dict, feature_dim_list, best_metric: float):
+    payload = {
+        "epoch": int(epoch),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+        "args": vars(args),
+        "cache_manifest": manifest,
+        "feature_dim_list": feature_dim_list,
+        "best_metric": float(best_metric),
+    }
+    torch.save(payload, path)
+
+
+def _write_prediction_csv(path: Path, preds, labels, metadata_rows):
+    rows = []
+    for pred, label, metadata in zip(preds, labels, metadata_rows):
+        row = dict(metadata)
+        row["label"] = label
+        row["prediction"] = pred
+        rows.append(row)
+    write_csv(path, rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train DEKP on explicit train/val/test splits with cached features.")
+    parser.add_argument("--train_path", type=str, default=None)
+    parser.add_argument("--val_path", type=str, default=None)
+    parser.add_argument("--test_path", type=str, default=None)
+    parser.add_argument("--base_dir", type=str, default=str(DEFAULT_BASE_DIR))
+    parser.add_argument("--split_group", type=str, default=None)
+    parser.add_argument("--threshold", type=str, default=None)
+    parser.add_argument("--cache_dir", type=str, default=str(DEFAULT_CACHE_DIR))
+    parser.add_argument("--out_dir", type=str, required=True)
+    parser.add_argument("--task_name", type=str, default="dekp_run")
+    parser.add_argument("--feature_list", type=str, default=",".join(DEFAULT_FEATURES))
+    parser.add_argument("--sequence_col", type=str, default=None)
+    parser.add_argument("--smiles_col", type=str, default=None)
+    parser.add_argument("--protein_id_col", type=str, default=None)
+    parser.add_argument("--structure_id_col", type=str, default=None)
+    parser.add_argument("--target_col", type=str, default=None)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight_decay", type=float, default=3e-4)
+    parser.add_argument("--scheduler", choices=["none", "plateau", "cosine"], default="cosine")
+    parser.add_argument("--lr_decay_factor", type=float, default=0.5)
+    parser.add_argument("--lr_decay_patience", type=int, default=5)
+    parser.add_argument("--min_lr", type=float, default=1e-6)
+    parser.add_argument("--lr_warmup_epochs", type=int, default=3)
+    parser.add_argument("--lr_warmup_start_factor", type=float, default=0.1)
+    parser.add_argument("--clip_grad", type=float, default=1.0)
+    parser.add_argument("--patience", type=int, default=20)
+    parser.add_argument("--min_delta", type=float, default=0.0)
+    parser.add_argument("--hidden", type=int, default=32)
+    parser.add_argument("--num_layers", type=int, default=3)
+    parser.add_argument("--kernel_size", type=int, default=9)
+    parser.add_argument("--dropout", type=float, default=0.5)
+    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--prefetch_factor", type=int, default=4)
+    parser.add_argument("--persistent_workers", action="store_true")
+    parser.add_argument("--pin_memory", action="store_true")
+    parser.add_argument("--preload_proteins", action="store_true")
+    parser.add_argument("--preload_ligands", action="store_true")
+    parser.add_argument("--preload_structures", action="store_true")
+    parser.add_argument("--cache_items", type=int, default=512)
+    parser.add_argument("--seed", type=int, default=3407)
+    parser.add_argument("--compile_model", action="store_true")
+    args = parser.parse_args()
+
+    if args.train_path is None or args.val_path is None or args.test_path is None:
+        if not args.split_group:
+            raise ValueError("Provide either explicit --train_path/--val_path/--test_path or --split_group.")
+        job = resolve_single_split_job(Path(args.base_dir), args.split_group, args.threshold)
+        args.train_path = job["train_path"]
+        args.val_path = job["val_path"]
+        args.test_path = job["test_path"]
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = Path(args.cache_dir)
+    manifest = load_json(cache_dir / "manifest.json")
+    args.feature_list = [item.strip() for item in args.feature_list.split(",") if item.strip()]
+
+    train_df = read_table(Path(args.train_path))
+    val_df = read_table(Path(args.val_path))
+    test_df = read_table(Path(args.test_path))
+    resolved_columns = _resolve_columns(train_df, manifest, args)
+    if resolved_columns["protein_id_col"] is None:
+        resolved_columns["protein_id_col"] = resolved_columns["sequence_col"]
+    if resolved_columns["structure_id_col"] is None:
+        resolved_columns["structure_id_col"] = resolved_columns["protein_id_col"]
+
+    set_seed(args.seed)
+    device = torch.device(args.device)
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
+    amp_dtype, amp_name = _resolve_amp(device)
+
+    protein_store = ProteinEmbeddingStore(
+        cache_dir=cache_dir,
+        sequences=train_df[resolved_columns["sequence_col"]].tolist() if args.preload_proteins else None,
+        preload=args.preload_proteins,
+        max_items=args.cache_items,
+        max_len=int(manifest["protein_max_len"]),
+    )
+    ligand_store = LigandEmbeddingStore(
+        cache_dir=cache_dir,
+        smiles_values=train_df[resolved_columns["smiles_col"]].tolist() if args.preload_ligands else None,
+        preload=args.preload_ligands,
+        max_items=args.cache_items,
+    )
+    structure_items = None
+    if args.preload_structures:
+        structure_items = list(
+            zip(
+                train_df[resolved_columns["structure_id_col"]].astype(str).tolist(),
+                train_df[resolved_columns["sequence_col"]].astype(str).tolist(),
+            )
+        )
+    structure_store = StructureEmbeddingStore(
+        cache_dir=cache_dir,
+        items=structure_items,
+        preload=args.preload_structures,
+        max_items=args.cache_items,
+    )
+
+    dataset_kwargs = {
+        "protein_store": protein_store,
+        "ligand_store": ligand_store,
+        "structure_store": structure_store,
+        "feature_names": args.feature_list,
+        "sequence_col": resolved_columns["sequence_col"],
+        "smiles_col": resolved_columns["smiles_col"],
+        "protein_id_col": resolved_columns["protein_id_col"],
+        "structure_id_col": resolved_columns["structure_id_col"],
+        "target_col": resolved_columns["target_col"],
+        "protein_max_len": int(manifest["protein_max_len"]),
+        "smiles_max_len": int(manifest["smiles_max_len"]),
+        "protein_pad_id": int(manifest["protein_pad_id"]),
+        "smiles_pad_id": int(manifest["smiles_pad_id"]),
+    }
+    train_ds = CachedDEKPDataset(train_df, **dataset_kwargs)
+    val_ds = CachedDEKPDataset(val_df, **dataset_kwargs)
+    test_ds = CachedDEKPDataset(test_df, **dataset_kwargs)
+
+    train_loader = _make_loader(train_ds, batch_size=args.batch_size, shuffle=True, args=args)
+    val_loader = _make_loader(val_ds, batch_size=args.batch_size, shuffle=False, args=args)
+    test_loader = _make_loader(test_ds, batch_size=args.batch_size, shuffle=False, args=args)
+
+    feature_dim_list = [int(manifest["feature_dims"][name]) for name in args.feature_list]
+    model = MetaDecoder(
+        seq_vocab_size=int(manifest["protein_vocab_size"]),
+        smi_vocab_size=int(manifest["smiles_vocab_size"]),
+        feature_dim_list=feature_dim_list,
+        hidden=args.hidden,
+        num_layers=args.num_layers,
+        protein_len=int(manifest["protein_max_len"]),
+        smi_len=int(manifest["smiles_max_len"]),
+        dropout=args.dropout,
+        kernel_size=args.kernel_size,
+    ).to(device)
+    if args.compile_model and hasattr(torch, "compile"):
+        model = torch.compile(model)
+
+    criterion = torch.nn.MSELoss(reduction="mean")
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = _build_scheduler(optimizer, args)
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and amp_dtype == torch.float16))
+
+    best_state = None
+    best_metric = float("inf")
+    best_epoch = -1
+    bad_epochs = 0
+    started = time.time()
+    log_path = out_dir / "logfile.csv"
+
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        train_loss_sum = 0.0
+        train_examples = 0
+        iterator = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", unit="batch")
+        for graph_batch, protein_tokens, smiles_tokens, features, labels, _ in iterator:
+            graph_batch, protein_tokens, smiles_tokens, features, labels = _move_batch(
+                graph_batch, protein_tokens, smiles_tokens, features, labels, device
+            )
+            optimizer.zero_grad(set_to_none=True)
+            with _autocast_context(device, amp_dtype):
+                outputs = model(graph_batch, protein_tokens, smiles_tokens, features)
+                loss = criterion(outputs, labels)
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+                if args.clip_grad > 0:
+                    scaler.unscale_(optimizer)
+                    clip_grad_norm_(model.parameters(), args.clip_grad)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                if args.clip_grad > 0:
+                    clip_grad_norm_(model.parameters(), args.clip_grad)
+                optimizer.step()
+            batch_size = int(labels.numel())
+            train_loss_sum += float(loss.item()) * batch_size
+            train_examples += batch_size
+            iterator.set_postfix(loss=f"{(train_loss_sum / max(1, train_examples)):.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
+
+        train_loss = train_loss_sum / max(1, train_examples)
+        val_metrics, _, _, _ = evaluate(model, val_loader, device=device, amp_dtype=amp_dtype)
+        test_metrics, _, _, _ = evaluate(model, test_loader, device=device, amp_dtype=amp_dtype)
+
+        if scheduler is not None:
+            if args.scheduler == "plateau":
+                scheduler.step(val_metrics["rmse"])
+            else:
+                scheduler.step()
+
+        row = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_metrics["loss"],
+            "val_rmse": val_metrics["rmse"],
+            "val_r2": val_metrics["r2"],
+            "val_mae": val_metrics["mae"],
+            "val_pearson": val_metrics["pearson"],
+            "test_rmse": test_metrics["rmse"],
+            "lr": optimizer.param_groups[0]["lr"],
+        }
+        append_csv_row(log_path, row)
+
+        improved = (best_metric - val_metrics["rmse"]) > args.min_delta
+        if improved:
+            best_metric = float(val_metrics["rmse"])
+            best_epoch = epoch
+            bad_epochs = 0
+            best_state = copy.deepcopy(model.state_dict())
+            _save_checkpoint(out_dir / "bestmodel.pt", model, optimizer, scheduler, epoch, args, manifest, feature_dim_list, best_metric)
+        else:
+            bad_epochs += 1
+
+        _save_checkpoint(out_dir / "checkpoint_last.pt", model, optimizer, scheduler, epoch, args, manifest, feature_dim_list, best_metric)
+        print(
+            json.dumps(
+                {
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    "val_rmse": val_metrics["rmse"],
+                    "test_rmse": test_metrics["rmse"],
+                    "best_val_rmse": best_metric,
+                    "amp": amp_name,
+                }
+            ),
+            flush=True,
+        )
+        if args.patience > 0 and bad_epochs >= args.patience:
+            print(f"Early stopping at epoch {epoch} after {bad_epochs} non-improving epochs.", flush=True)
+            break
+
+    if best_state is None:
+        best_state = model.state_dict()
+    model.load_state_dict(best_state)
+    val_metrics, val_preds, val_labels, val_metadata = evaluate(model, val_loader, device=device, amp_dtype=amp_dtype)
+    test_metrics, test_preds, test_labels, test_metadata = evaluate(model, test_loader, device=device, amp_dtype=amp_dtype)
+    final_summary = {
+        "task_name": args.task_name,
+        "seed": args.seed,
+        "best_epoch": int(best_epoch),
+        "amp_mode": amp_name,
+        "elapsed_seconds": time.time() - started,
+        "feature_list": ",".join(args.feature_list),
+        "train_rows": len(train_df),
+        "val_rows": len(val_df),
+        "test_rows": len(test_df),
+        **{f"val_{key}": value for key, value in val_metrics.items()},
+        **{f"test_{key}": value for key, value in test_metrics.items()},
+    }
+
+    write_csv(out_dir / "final_results_val.csv", [val_metrics])
+    write_csv(out_dir / "final_results_test.csv", [test_metrics])
+    _write_prediction_csv(out_dir / "pred_label_val.csv", val_preds, val_labels, val_metadata)
+    _write_prediction_csv(out_dir / "pred_label_test.csv", test_preds, test_labels, test_metadata)
+    write_csv(out_dir / "run_summary.csv", [final_summary])
+    save_json(out_dir / "run_summary.json", final_summary)
+
+
+if __name__ == "__main__":
+    main()
