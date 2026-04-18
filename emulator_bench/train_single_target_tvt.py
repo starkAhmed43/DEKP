@@ -143,6 +143,29 @@ def _write_prediction_csv(path: Path, preds, labels, metadata_rows):
     write_csv(path, rows)
 
 
+def _resolve_feature_dims(manifest: dict, feature_names, train_ds) -> list[int]:
+    feature_dims = dict(manifest.get("feature_dims", {}))
+    missing = [name for name in feature_names if name not in feature_dims]
+    if missing:
+        sample_row = train_ds.frame.iloc[0]
+        sequence = str(sample_row[train_ds.sequence_col])
+        smiles = str(sample_row[train_ds.smiles_col])
+        structure_id = str(sample_row[train_ds.structure_id_col]) if train_ds.structure_id_col in sample_row.index else str(sample_row[train_ds.protein_id_col])
+        protein_payload = train_ds.protein_store.get(sequence)
+        ligand_payload = train_ds.ligand_store.get(smiles)
+        structure_payload = train_ds.structure_store.get(structure_id, sequence)
+        for name in missing:
+            if name in protein_payload:
+                feature_dims[name] = int(torch.as_tensor(protein_payload[name]).numel())
+            elif name in ligand_payload:
+                feature_dims[name] = int(torch.as_tensor(ligand_payload[name]).numel())
+            elif name in structure_payload:
+                feature_dims[name] = int(torch.as_tensor(structure_payload[name]).numel())
+            else:
+                raise KeyError(f"Requested feature `{name}` is missing from both the cache manifest and cached payloads.")
+    return [int(feature_dims[name]) for name in feature_names]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train DEKP on explicit train/val/test splits with cached features.")
     parser.add_argument("--train_path", type=str, default=None)
@@ -264,7 +287,7 @@ def main():
     val_loader = _make_loader(val_ds, batch_size=args.batch_size, shuffle=False, args=args)
     test_loader = _make_loader(test_ds, batch_size=args.batch_size, shuffle=False, args=args)
 
-    feature_dim_list = [int(manifest["feature_dims"][name]) for name in args.feature_list]
+    feature_dim_list = _resolve_feature_dims(manifest, args.feature_list, train_ds)
     model = MetaDecoder(
         seq_vocab_size=int(manifest["protein_vocab_size"]),
         smi_vocab_size=int(manifest["smiles_vocab_size"]),

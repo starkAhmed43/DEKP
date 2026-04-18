@@ -440,6 +440,12 @@ def _finalize_structure_payload(path: Path, payload: dict, entry: dict, args, le
         payload.pop("dssp", None)
 
 
+def _update_feature_dims_from_payload(payload: dict, feature_dims: dict, requested_features) -> None:
+    for feature_name in requested_features:
+        if feature_name in payload and feature_name != "graph":
+            feature_dims[feature_name] = int(torch.as_tensor(payload[feature_name]).numel())
+
+
 def _make_structure_payload(entry: dict) -> dict:
     return {
         "structure_id": entry["structure_id"],
@@ -516,6 +522,8 @@ def _save_protein_payloads(unique_sequences, cache_dir: Path, protein_tokenizer:
     for entry in unique_sequences.values():
         path = protein_cache_path(cache_dir, entry["sequence"], max_len=args.protein_max_len)
         if path.exists() and not args.overwrite:
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+            _update_feature_dims_from_payload(payload, feature_dims, args.feature_list)
             continue
         if "t5" in args.feature_list:
             legacy_value = resolve_legacy_feature(legacy.get("t5"), entry["protein_id"], entry["sequence"])
@@ -613,6 +621,8 @@ def _save_ligand_payloads(unique_smiles, cache_dir: Path, smiles_tokenizer: Rege
     for entry in unique_smiles.values():
         path = ligand_cache_path(cache_dir, entry["smiles"])
         if path.exists() and not args.overwrite:
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+            _update_feature_dims_from_payload(payload, feature_dims, args.feature_list)
             continue
         payload = None
         if "trfm" in args.feature_list:
@@ -732,6 +742,8 @@ def _save_structure_payloads(unique_structures, cache_dir: Path, args, legacy):
     for entry in tqdm(unique_structures.values(), desc="Resolving structures", unit="structure"):
         path = structure_cache_path(cache_dir, structure_id=entry["structure_id"], fallback_sequence=entry["sequence"])
         if not args.overwrite and str(path) in existing_structure_cache:
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+            _update_feature_dims_from_payload(payload, feature_dims, args.feature_list)
             continue
         payload = _make_structure_payload(entry)
 
