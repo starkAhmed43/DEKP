@@ -216,7 +216,8 @@ def build_prot_t5_batches(sequences: Sequence[str], max_residues: int = 4000, ma
 
 
 def embed_prot_t5_batch(model, tokenizer, sequences: Sequence[str], device: torch.device) -> Dict[str, np.ndarray]:
-    tokenized = [" ".join(list(normalize_sequence(seq))) for seq in sequences]
+    normalized_sequences = [normalize_sequence(seq) for seq in sequences]
+    tokenized = [" ".join(list(sequence)) for sequence in normalized_sequences]
     encoding = tokenizer(
         tokenized,
         add_special_tokens=True,
@@ -228,10 +229,10 @@ def embed_prot_t5_batch(model, tokenizer, sequences: Sequence[str], device: torc
     with torch.no_grad():
         outputs = model(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
     embedded = {}
-    for idx, sequence in enumerate(sequences):
-        seq_len = len(normalize_sequence(sequence))
-        array = outputs[idx, :seq_len].detach().cpu().numpy()
-        embedded[sequence] = np.asarray(array.mean(axis=0), dtype=np.float32)
+    for idx, sequence in enumerate(normalized_sequences):
+        seq_len = len(sequence)
+        pooled = outputs[idx, :seq_len].mean(dim=0)
+        embedded[sequence] = pooled.detach().to(dtype=torch.float32).cpu().numpy()
     return embedded
 
 

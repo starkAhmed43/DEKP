@@ -569,6 +569,13 @@ def _save_protein_payloads(unique_sequences, cache_dir: Path, protein_tokenizer:
         model, tokenizer = load_prot_t5(args.prot_t5_model, device=device)
         sequences = [item["sequence"] for item in pending_t5]
         _log(f"ProtT5 phase: {len(sequences)} sequences require direct computation", args.verbose)
+        _log("ProtT5 phase: precomputing protein token ids", args.verbose)
+        token_id_lookup = {}
+        for item in tqdm(pending_t5, desc="Encoding protein tokens", unit="seq"):
+            token_id_lookup[item["sequence"]] = torch.tensor(
+                protein_tokenizer.encode(item["sequence"], max_length=args.protein_max_len, add_special_tokens=True),
+                dtype=torch.long,
+            )
         batches = build_prot_t5_batches(
             sequences,
             max_residues=args.prot_t5_max_residues,
@@ -584,10 +591,7 @@ def _save_protein_payloads(unique_sequences, cache_dir: Path, protein_tokenizer:
                 payload = {
                     "sequence": sequence,
                     "protein_id": item["protein_id"],
-                    "token_ids": torch.tensor(
-                        protein_tokenizer.encode(sequence, max_length=args.protein_max_len, add_special_tokens=True),
-                        dtype=torch.long,
-                    ),
+                    "token_ids": token_id_lookup[sequence],
                 }
                 tensor = torch.as_tensor(embedded[sequence], dtype=dtype)
                 payload["t5"] = tensor
@@ -597,9 +601,9 @@ def _save_protein_payloads(unique_sequences, cache_dir: Path, protein_tokenizer:
                 del payload
                 del tensor
             del embedded
-            _cleanup_torch_memory(device)
         del model
         del tokenizer
+        del token_id_lookup
         del batch_lookup
         del batches
         del sequences
