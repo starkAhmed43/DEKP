@@ -34,6 +34,7 @@ from emulator_bench.common import (
     resolve_single_split_job,
     save_json,
     set_seed,
+    structure_cache_path,
     write_csv,
 )
 from emulator_bench.dataset import CachedDEKPDataset, LigandEmbeddingStore, ProteinEmbeddingStore, StructureEmbeddingStore
@@ -166,6 +167,46 @@ def _resolve_feature_dims(manifest: dict, feature_names, train_ds) -> list[int]:
     return [int(feature_dims[name]) for name in feature_names]
 
 
+def _filter_missing_structure_rows(frame: pd.DataFrame, split_name: str, resolved_columns: dict, cache_dir: Path) -> pd.DataFrame:
+    sequence_col = resolved_columns["sequence_col"]
+    protein_id_col = resolved_columns["protein_id_col"]
+    structure_id_col = resolved_columns["structure_id_col"]
+
+    keep_mask = []
+    missing_structure_ids = []
+    for _, row in frame.iterrows():
+        sequence = str(row[sequence_col])
+        protein_id = str(row[protein_id_col])
+        structure_value = row[structure_id_col] if structure_id_col in row.index else protein_id
+        if pd.isna(structure_value) or str(structure_value).strip() == "":
+            structure_id = protein_id
+        else:
+            structure_id = str(structure_value).strip()
+
+        cache_path = structure_cache_path(cache_dir, structure_id=structure_id, fallback_sequence=sequence)
+        exists = cache_path.exists()
+        keep_mask.append(exists)
+        if not exists:
+            missing_structure_ids.append(structure_id)
+
+    total_rows = int(len(frame))
+    removed_rows = int(total_rows - sum(keep_mask))
+    kept_rows = int(total_rows - removed_rows)
+    removed_pct = (100.0 * removed_rows / total_rows) if total_rows else 0.0
+    payload = {
+        "split": split_name,
+        "total_rows": total_rows,
+        "kept_rows": kept_rows,
+        "removed_rows_missing_structure": removed_rows,
+        "removed_pct_missing_structure": round(removed_pct, 4),
+    }
+    if missing_structure_ids:
+        payload["missing_structure_examples"] = missing_structure_ids[:10]
+    print(json.dumps(payload), flush=True)
+
+    return frame.loc[keep_mask].reset_index(drop=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train DEKP on explicit train/val/test splits with cached features.")
     parser.add_argument("--train_path", type=str, default=None)
@@ -226,6 +267,36 @@ def main():
         resolved_columns["protein_id_col"] = resolved_columns["sequence_col"]
     if resolved_columns["structure_id_col"] is None:
         resolved_columns["structure_id_col"] = resolved_columns["protein_id_col"]
+
+    original_train_rows = len(train_df)
+    original_val_rows = len(val_df)
+    original_test_rows = len(test_df)
+
+    train_df = _filter_missing_structure_rows(train_df, "train", resolved_columns, cache_dir)
+    val_df = _filter_missing_structure_rows(val_df, "val", resolved_columns, cache_dir)
+    test_df = _filter_missing_structure_rows(test_df, "test", resolved_columns, cache_dir)
+
+    filtered_total = len(train_df) + len(val_df) + len(test_df)
+    original_total = original_train_rows + original_val_rows + original_test_rows
+    removed_total = int(original_total - filtered_total)
+    removed_total_pct = (100.0 * removed_total / original_total) if original_total else 0.0
+    print(
+        json.dumps(
+            {
+                "split_filter_summary": {
+                    "total_rows": int(original_total),
+                    "kept_rows": int(filtered_total),
+                    "removed_rows_missing_structure": removed_total,
+                    "removed_pct_missing_structure": round(removed_total_pct, 4),
+                }
+            }
+        ),
+        flush=True,
+    )
+    if len(train_df) == 0 or len(val_df) == 0 or len(test_df) == 0:
+        raise RuntimeError(
+            f"After dropping rows with missing structures, split sizes are train={len(train_df)}, val={len(val_df)}, test={len(test_df)}."
+        )
 
     set_seed(args.seed)
     device = torch.device(args.device)
