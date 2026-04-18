@@ -522,8 +522,9 @@ def _save_protein_payloads(unique_sequences, cache_dir: Path, protein_tokenizer:
     for entry in unique_sequences.values():
         path = protein_cache_path(cache_dir, entry["sequence"], max_len=args.protein_max_len)
         if path.exists() and not args.overwrite:
-            payload = torch.load(path, map_location="cpu", weights_only=False)
-            _update_feature_dims_from_payload(payload, feature_dims, args.feature_list)
+            if "t5" in args.feature_list and "t5" not in feature_dims:
+                payload = torch.load(path, map_location="cpu", weights_only=False)
+                _update_feature_dims_from_payload(payload, feature_dims, args.feature_list)
             continue
         if "t5" in args.feature_list:
             legacy_value = resolve_legacy_feature(legacy.get("t5"), entry["protein_id"], entry["sequence"])
@@ -621,8 +622,12 @@ def _save_ligand_payloads(unique_smiles, cache_dir: Path, smiles_tokenizer: Rege
     for entry in unique_smiles.values():
         path = ligand_cache_path(cache_dir, entry["smiles"])
         if path.exists() and not args.overwrite:
-            payload = torch.load(path, map_location="cpu", weights_only=False)
-            _update_feature_dims_from_payload(payload, feature_dims, args.feature_list)
+            if (
+                ("trfm" in args.feature_list and "trfm" not in feature_dims)
+                or ("molformer" in args.feature_list and "molformer" not in feature_dims)
+            ):
+                payload = torch.load(path, map_location="cpu", weights_only=False)
+                _update_feature_dims_from_payload(payload, feature_dims, args.feature_list)
             continue
         payload = None
         if "trfm" in args.feature_list:
@@ -742,8 +747,12 @@ def _save_structure_payloads(unique_structures, cache_dir: Path, args, legacy):
     for entry in tqdm(unique_structures.values(), desc="Resolving structures", unit="structure"):
         path = structure_cache_path(cache_dir, structure_id=entry["structure_id"], fallback_sequence=entry["sequence"])
         if not args.overwrite and str(path) in existing_structure_cache:
-            payload = torch.load(path, map_location="cpu", weights_only=False)
-            _update_feature_dims_from_payload(payload, feature_dims, args.feature_list)
+            if (
+                ("pst" in args.feature_list and "pst" not in feature_dims)
+                or ("dssp" in args.feature_list and "dssp" not in feature_dims)
+            ):
+                payload = torch.load(path, map_location="cpu", weights_only=False)
+                _update_feature_dims_from_payload(payload, feature_dims, args.feature_list)
             continue
         payload = _make_structure_payload(entry)
 
