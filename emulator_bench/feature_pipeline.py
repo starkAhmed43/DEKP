@@ -26,7 +26,7 @@ from emulator_bench.common import normalize_sequence
 
 RDLogger.DisableLog("rdApp.warning")
 
-DEFAULT_TRFM_WEIGHTS = (REPO_ROOT.parent / "KcatNet" / "utils" / "trfm_12_23000.pkl")
+DEFAULT_TRFM_WEIGHTS = REPO_ROOT / "emulator_bench" / "trfm_12_23000.pkl"
 DEFAULT_TRFM_VOCAB = REPO_ROOT / "DEKP" / "vocab.pkl"
 
 
