@@ -217,9 +217,14 @@ def build_prot_t5_batches(sequences: Sequence[str], max_residues: int = 4000, ma
 
 def embed_prot_t5_batch(model, tokenizer, sequences: Sequence[str], device: torch.device) -> Dict[str, np.ndarray]:
     tokenized = [" ".join(list(normalize_sequence(seq))) for seq in sequences]
-    encoding = tokenizer.batch_encode_plus(tokenized, add_special_tokens=True, padding="longest")
-    input_ids = torch.tensor(encoding["input_ids"], device=device)
-    attention_mask = torch.tensor(encoding["attention_mask"], device=device)
+    encoding = tokenizer(
+        tokenized,
+        add_special_tokens=True,
+        padding="longest",
+        return_tensors="pt",
+    )
+    input_ids = encoding["input_ids"].to(device)
+    attention_mask = encoding["attention_mask"].to(device)
     with torch.no_grad():
         outputs = model(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
     embedded = {}
