@@ -28,7 +28,9 @@ from emulator_bench.common import (
     DEFAULT_FEATURES,
     append_csv_row,
     find_first_existing_column,
+    ligand_cache_path,
     load_json,
+    protein_cache_path,
     read_table,
     regression_metrics,
     resolve_single_split_job,
@@ -167,15 +169,19 @@ def _resolve_feature_dims(manifest: dict, feature_names, train_ds) -> list[int]:
     return [int(feature_dims[name]) for name in feature_names]
 
 
-def _filter_missing_structure_rows(frame: pd.DataFrame, split_name: str, resolved_columns: dict, cache_dir: Path) -> pd.DataFrame:
+def _filter_missing_cache_rows(frame: pd.DataFrame, split_name: str, resolved_columns: dict, cache_dir: Path, manifest: dict) -> pd.DataFrame:
     sequence_col = resolved_columns["sequence_col"]
     protein_id_col = resolved_columns["protein_id_col"]
     structure_id_col = resolved_columns["structure_id_col"]
+    protein_max_len = int(manifest["protein_max_len"])
 
     keep_mask = []
+    missing_protein_ids = []
+    missing_ligand_ids = []
     missing_structure_ids = []
     for _, row in frame.iterrows():
         sequence = str(row[sequence_col])
+        smiles = str(row[resolved_columns["smiles_col"]])
         protein_id = str(row[protein_id_col])
         structure_value = row[structure_id_col] if structure_id_col in row.index else protein_id
         if pd.isna(structure_value) or str(structure_value).strip() == "":
@@ -183,10 +189,19 @@ def _filter_missing_structure_rows(frame: pd.DataFrame, split_name: str, resolve
         else:
             structure_id = str(structure_value).strip()
 
-        cache_path = structure_cache_path(cache_dir, structure_id=structure_id, fallback_sequence=sequence)
-        exists = cache_path.exists()
-        keep_mask.append(exists)
-        if not exists:
+        protein_path = protein_cache_path(cache_dir, sequence=sequence, max_len=protein_max_len)
+        ligand_path = ligand_cache_path(cache_dir, smiles=smiles)
+        structure_path = structure_cache_path(cache_dir, structure_id=structure_id, fallback_sequence=sequence)
+
+        protein_exists = protein_path.exists()
+        ligand_exists = ligand_path.exists()
+        structure_exists = structure_path.exists()
+        keep_mask.append(protein_exists and ligand_exists and structure_exists)
+        if not protein_exists:
+            missing_protein_ids.append(protein_id)
+        if not ligand_exists:
+            missing_ligand_ids.append(smiles)
+        if not structure_exists:
             missing_structure_ids.append(structure_id)
 
     total_rows = int(len(frame))
@@ -197,9 +212,16 @@ def _filter_missing_structure_rows(frame: pd.DataFrame, split_name: str, resolve
         "split": split_name,
         "total_rows": total_rows,
         "kept_rows": kept_rows,
-        "removed_rows_missing_structure": removed_rows,
-        "removed_pct_missing_structure": round(removed_pct, 4),
+        "removed_rows_missing_any_cache": removed_rows,
+        "removed_pct_missing_any_cache": round(removed_pct, 4),
+        "rows_missing_protein_cache": len(missing_protein_ids),
+        "rows_missing_ligand_cache": len(missing_ligand_ids),
+        "rows_missing_structure_cache": len(missing_structure_ids),
     }
+    if missing_protein_ids:
+        payload["missing_protein_examples"] = missing_protein_ids[:10]
+    if missing_ligand_ids:
+        payload["missing_ligand_examples"] = missing_ligand_ids[:10]
     if missing_structure_ids:
         payload["missing_structure_examples"] = missing_structure_ids[:10]
     print(json.dumps(payload), flush=True)
@@ -272,9 +294,9 @@ def main():
     original_val_rows = len(val_df)
     original_test_rows = len(test_df)
 
-    train_df = _filter_missing_structure_rows(train_df, "train", resolved_columns, cache_dir)
-    val_df = _filter_missing_structure_rows(val_df, "val", resolved_columns, cache_dir)
-    test_df = _filter_missing_structure_rows(test_df, "test", resolved_columns, cache_dir)
+    train_df = _filter_missing_cache_rows(train_df, "train", resolved_columns, cache_dir, manifest)
+    val_df = _filter_missing_cache_rows(val_df, "val", resolved_columns, cache_dir, manifest)
+    test_df = _filter_missing_cache_rows(test_df, "test", resolved_columns, cache_dir, manifest)
 
     filtered_total = len(train_df) + len(val_df) + len(test_df)
     original_total = original_train_rows + original_val_rows + original_test_rows
@@ -286,8 +308,8 @@ def main():
                 "split_filter_summary": {
                     "total_rows": int(original_total),
                     "kept_rows": int(filtered_total),
-                    "removed_rows_missing_structure": removed_total,
-                    "removed_pct_missing_structure": round(removed_total_pct, 4),
+                    "removed_rows_missing_any_cache": removed_total,
+                    "removed_pct_missing_any_cache": round(removed_total_pct, 4),
                 }
             }
         ),
@@ -295,7 +317,7 @@ def main():
     )
     if len(train_df) == 0 or len(val_df) == 0 or len(test_df) == 0:
         raise RuntimeError(
-            f"After dropping rows with missing structures, split sizes are train={len(train_df)}, val={len(val_df)}, test={len(test_df)}."
+            f"After dropping rows with missing cache entries, split sizes are train={len(train_df)}, val={len(val_df)}, test={len(test_df)}."
         )
 
     set_seed(args.seed)
