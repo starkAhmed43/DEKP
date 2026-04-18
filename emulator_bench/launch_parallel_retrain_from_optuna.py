@@ -117,11 +117,14 @@ def _load_best_hparams(args):
 
 
 def main():
+    bootstrap_parser = argparse.ArgumentParser(add_help=False)
+    bootstrap_parser.add_argument("--config_json", type=str, default=None)
+    bootstrap_args, _ = bootstrap_parser.parse_known_args()
+
     parser = _build_parser()
-    bootstrap_args, remaining_argv = parser.parse_known_args()
     config_payload = _load_config_payload(bootstrap_args.config_json)
     parser.set_defaults(**config_payload)
-    args = parser.parse_args(remaining_argv)
+    args = parser.parse_args()
 
     missing = [name for name in ["gpus", "base_dir", "cache_dir", "feature_list"] if getattr(args, name) in (None, [], "")]
     if missing:
