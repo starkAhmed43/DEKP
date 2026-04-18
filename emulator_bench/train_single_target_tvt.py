@@ -434,7 +434,6 @@ def main():
 
         train_loss = train_loss_sum / max(1, train_examples)
         val_metrics, _, _, _ = evaluate(model, val_loader, device=device, amp_dtype=amp_dtype)
-        test_metrics, _, _, _ = evaluate(model, test_loader, device=device, amp_dtype=amp_dtype)
 
         row = {
             "epoch": epoch,
@@ -444,7 +443,6 @@ def main():
             "val_r2": val_metrics["r2"],
             "val_mae": val_metrics["mae"],
             "val_pearson": val_metrics["pearson"],
-            "test_rmse": test_metrics["rmse"],
             "lr": optimizer.param_groups[0]["lr"],
         }
         append_csv_row(log_path, row)
@@ -455,14 +453,14 @@ def main():
             best_state = copy.deepcopy(model.state_dict())
             _save_checkpoint(out_dir / "bestmodel.pt", model, optimizer, epoch, args, manifest, feature_dim_list, best_metric)
 
-        _save_checkpoint(out_dir / "checkpoint_last.pt", model, optimizer, epoch, args, manifest, feature_dim_list, best_metric)
+        if epoch % 10 == 0 or epoch == args.epochs:
+            _save_checkpoint(out_dir / "checkpoint_last.pt", model, optimizer, epoch, args, manifest, feature_dim_list, best_metric)
         print(
             json.dumps(
                 {
                     "epoch": epoch,
                     "train_loss": train_loss,
                     "val_rmse": val_metrics["rmse"],
-                    "test_rmse": test_metrics["rmse"],
                     "best_val_rmse": best_metric,
                     "amp": amp_name,
                 }
