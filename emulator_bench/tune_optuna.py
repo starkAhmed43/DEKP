@@ -64,16 +64,7 @@ def suggest_hparams(trial: optuna.Trial, args) -> dict:
         "batch_size": batch_size,
         "lr": trial.suggest_float("lr", 1e-4, 5e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
-        "min_lr": trial.suggest_float("min_lr", 1e-7, 1e-4, log=True),
-        "lr_warmup_epochs": trial.suggest_int("lr_warmup_epochs", 0, 8),
-        "lr_warmup_start_factor": trial.suggest_float("lr_warmup_start_factor", 0.05, 0.5),
-        "clip_grad": trial.suggest_categorical("clip_grad", [0.5, 1.0, 2.0, 5.0]),
         "dropout": float(args.dropout),
-        "scheduler": "cosine",
-        "lr_decay_factor": 0.5,
-        "lr_decay_patience": 5,
-        "patience": int(args.patience),
-        "min_delta": float(args.min_delta),
     }
 
 
@@ -107,24 +98,6 @@ def run_trial_job(job: dict, seed: int, hparams: dict, args, trial_number: int) 
             str(hparams["lr"]),
             "--weight_decay",
             str(hparams["weight_decay"]),
-            "--scheduler",
-            str(hparams["scheduler"]),
-            "--lr_decay_factor",
-            str(hparams["lr_decay_factor"]),
-            "--lr_decay_patience",
-            str(hparams["lr_decay_patience"]),
-            "--min_lr",
-            str(hparams["min_lr"]),
-            "--lr_warmup_epochs",
-            str(hparams["lr_warmup_epochs"]),
-            "--lr_warmup_start_factor",
-            str(hparams["lr_warmup_start_factor"]),
-            "--clip_grad",
-            str(hparams["clip_grad"]),
-            "--patience",
-            str(hparams["patience"]),
-            "--min_delta",
-            str(hparams["min_delta"]),
             "--hidden",
             str(args.hidden),
             "--num_layers",
@@ -222,8 +195,6 @@ def main():
     parser.add_argument("--graph_atom_type", type=str, default="CA")
     parser.add_argument("--cache_dtype", choices=["float16", "float32"], default="float16")
     parser.add_argument("--cache_device", type=str, default="cuda:0")
-    parser.add_argument("--patience", type=int, default=20)
-    parser.add_argument("--min_delta", type=float, default=0.0)
     args = parser.parse_args()
 
     args.thresholds = normalize_threshold_args(args.thresholds, args.threshold)

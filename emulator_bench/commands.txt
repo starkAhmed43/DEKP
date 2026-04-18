@@ -73,15 +73,29 @@ python emulator_bench/launch_parallel_optuna.py \
 
 python emulator_bench/launch_parallel_retrain_from_optuna.py \
   --gpus 0 1 \
+  --jobs_per_gpu 2 \
   --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
   --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
-  --feature_list trfm,t5 \
+  --config_json emulator_bench/configs/fine_tune_defaults.json \
   --experimental_pdb_dir /path/to/experimental_pdbs \
   --alphafold_pdb_dir /path/to/alphafold_pdbs \
   --esm3_pdb_dir /path/to/esm3_pdbs \
-  --epochs 80 \
-  --study_name dekp_optuna \
-  --storage sqlite:////tmp/dekp_optuna.db \
+  --split_groups enzyme_sequence_splits substrate_splits random_splits \
   --seeds 3407 \
+  --pin_memory \
+  --persistent_workers
+
+python emulator_bench/launch_parallel_retrain_from_optuna.py \
+  --gpus 0 \
+  --trials_per_gpu 3 \
+  --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
+  --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
+  --config_json emulator_bench/configs/fine_tune_defaults.json \
+  --split_groups enzyme_sequence_splits substrate_splits \
+  --thresholds threshold_0.3 threshold_0.6 \
+  --hparams_json emulator_bench/configs/fine_tune_defaults.json \
+  --seeds 3407 3408 3409 \
+  --num_workers 4 \
+  --prefetch_factor 4 \
   --pin_memory \
   --persistent_workers

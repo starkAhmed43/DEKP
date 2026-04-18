@@ -1,0 +1,12 @@
+{
+  "feature_list": "trfm,t5",
+  "seeds": [3407],
+  "epochs": 200,
+  "batch_size": 64,
+  "lr": 0.001,
+  "weight_decay": 0.0003,
+  "hidden": 32,
+  "num_layers": 3,
+  "kernel_size": 9,
+  "dropout": 0.5
+}

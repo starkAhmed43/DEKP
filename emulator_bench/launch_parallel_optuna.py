@@ -76,8 +76,6 @@ def main():
     parser.add_argument("--num_layers", type=int, default=3)
     parser.add_argument("--kernel_size", type=int, default=9)
     parser.add_argument("--dropout", type=float, default=0.5)
-    parser.add_argument("--patience", type=int, default=20)
-    parser.add_argument("--min_delta", type=float, default=0.0)
     args = parser.parse_args()
 
     args.thresholds = normalize_threshold_args(args.thresholds, args.threshold)
@@ -131,10 +129,6 @@ def main():
                 "--sampler_seed",
                 str(args.sampler_seed + worker_index),
                 "--skip_cache",
-                "--patience",
-                str(args.patience),
-                "--min_delta",
-                str(args.min_delta),
                 "--hidden",
                 str(args.hidden),
                 "--num_layers",

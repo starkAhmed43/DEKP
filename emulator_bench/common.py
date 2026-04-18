@@ -193,6 +193,23 @@ def _find_split_file(directory: Path, stem: str) -> Optional[Path]:
     return None
 
 
+def _build_split_job(root_dir: Path, split_group: str, split_name: str, difficulty: str) -> Optional[Dict[str, str]]:
+    train_path = _find_split_file(root_dir, "train")
+    val_path = _find_split_file(root_dir, "val")
+    test_path = _find_split_file(root_dir, "test")
+    if not (train_path and val_path and test_path):
+        return None
+    return {
+        "split_group": split_group,
+        "split_name": split_name,
+        "difficulty": difficulty,
+        "root_dir": str(root_dir),
+        "train_path": str(train_path),
+        "val_path": str(val_path),
+        "test_path": str(test_path),
+    }
+
+
 def discover_split_jobs(
     base_dir: Path,
     split_groups: Optional[Iterable[str]] = None,
@@ -207,74 +224,60 @@ def discover_split_jobs(
         if not group_dir.exists():
             continue
 
-        if split_group in {"random_splits", "group_shuffle_splits"}:
-            train_path = _find_split_file(group_dir, "train")
-            val_path = _find_split_file(group_dir, "val")
-            test_path = _find_split_file(group_dir, "test")
-            if train_path and val_path and test_path:
-                split_name = "random" if split_group == "random_splits" else "group_shuffle"
-                jobs.append(
-                    {
-                        "split_group": split_group,
-                        "split_name": split_name,
-                        "difficulty": split_name,
-                        "root_dir": str(group_dir),
-                        "train_path": str(train_path),
-                        "val_path": str(val_path),
-                        "test_path": str(test_path),
-                    }
-                )
-            continue
+        # Some split groups are "flat" and store train/val/test directly under the group dir.
+        flat_job = _build_split_job(
+            group_dir,
+            split_group=split_group,
+            split_name="flat",
+            difficulty="flat",
+        )
+        if flat_job is not None and (
+            threshold_filter is None or any(name in threshold_filter for name in {"flat", "default", split_group})
+        ):
+            jobs.append(flat_job)
 
-        candidate_dirs = []
+        candidate_jobs = []
         for child in sorted(group_dir.iterdir()):
             if not child.is_dir():
                 continue
             if threshold_filter is not None and child.name not in threshold_filter:
                 continue
-            if child.name.startswith("threshold_") or child.name in {"easy", "medium", "hard"}:
-                candidate_dirs.append(child)
+            child_job = _build_split_job(
+                child,
+                split_group=split_group,
+                split_name=child.name,
+                difficulty=child.name,
+            )
+            if child_job is not None:
+                candidate_jobs.append(child_job)
 
-        threshold_names = [path.name for path in candidate_dirs if path.name.startswith("threshold_")]
+        threshold_names = [job["split_name"] for job in candidate_jobs if job["split_name"].startswith("threshold_")]
         threshold_difficulties = _difficulty_labels_for_thresholds(threshold_names)
 
-        for child in candidate_dirs:
-            train_path = _find_split_file(child, "train")
-            val_path = _find_split_file(child, "val")
-            test_path = _find_split_file(child, "test")
-            if not (train_path and val_path and test_path):
-                continue
-
-            difficulty = threshold_difficulties.get(child.name, child.name)
-            jobs.append(
-                {
-                    "split_group": split_group,
-                    "split_name": child.name,
-                    "difficulty": difficulty,
-                    "root_dir": str(child),
-                    "train_path": str(train_path),
-                    "val_path": str(val_path),
-                    "test_path": str(test_path),
-                }
-            )
+        for job in candidate_jobs:
+            job["difficulty"] = threshold_difficulties.get(job["split_name"], job["difficulty"])
+            jobs.append(job)
 
     return jobs
 
 
 def resolve_single_split_job(base_dir: Path, split_group: str, threshold: Optional[str] = None) -> Dict[str, str]:
-    threshold_filter = None if split_group in {"random_splits", "group_shuffle_splits"} else normalize_threshold_args(threshold=threshold)
+    threshold_filter = normalize_threshold_args(threshold=threshold)
     jobs = discover_split_jobs(base_dir, split_groups=[split_group], thresholds=threshold_filter)
     if not jobs:
         detail = f"{split_group}/{threshold}" if threshold else split_group
         raise FileNotFoundError(f"No split job discovered for {detail} in {base_dir}")
-    if split_group in {"random_splits", "group_shuffle_splits"}:
-        return jobs[0]
     if threshold is None and len(jobs) > 1:
         available = ", ".join(job["split_name"] for job in jobs)
         raise ValueError(f"Multiple jobs found for {split_group}. Specify --threshold. Available: {available}")
     if threshold is None:
         return jobs[0]
-    matching = [job for job in jobs if job["split_name"] == threshold]
+    matching = [
+        job
+        for job in jobs
+        if job["split_name"] == threshold
+        or (job["split_name"] == "flat" and threshold in {"flat", "default", split_group})
+    ]
     if not matching:
         available = ", ".join(job["split_name"] for job in jobs)
         raise FileNotFoundError(f"Threshold `{threshold}` not found for {split_group}. Available: {available}")

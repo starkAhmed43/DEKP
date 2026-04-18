@@ -9,9 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 import torch
-from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, ReduceLROnPlateau, SequentialLR
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -56,33 +54,6 @@ def _autocast_context(device: torch.device, amp_dtype):
     if device.type == "cuda" and amp_dtype is not None:
         return torch.autocast(device_type="cuda", dtype=amp_dtype)
     return nullcontext()
-
-
-def _build_scheduler(optimizer, args):
-    if args.scheduler == "none":
-        return None
-    if args.scheduler == "plateau":
-        return ReduceLROnPlateau(
-            optimizer,
-            mode="min",
-            factor=args.lr_decay_factor,
-            patience=args.lr_decay_patience,
-            min_lr=args.min_lr,
-        )
-    if args.scheduler == "cosine":
-        warmup_epochs = max(0, min(int(args.lr_warmup_epochs), int(args.epochs) - 1))
-        cosine_epochs = max(1, int(args.epochs) - warmup_epochs)
-        cosine = CosineAnnealingLR(optimizer, T_max=cosine_epochs, eta_min=float(args.min_lr))
-        if warmup_epochs == 0:
-            return cosine
-        warmup = LinearLR(
-            optimizer,
-            start_factor=float(args.lr_warmup_start_factor),
-            end_factor=1.0,
-            total_iters=max(1, warmup_epochs),
-        )
-        return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
-    raise ValueError(f"Unsupported scheduler: {args.scheduler}")
 
 
 def _resolve_columns(frame: pd.DataFrame, manifest: dict, args):
@@ -149,12 +120,11 @@ def evaluate(model, loader, device, amp_dtype):
     return metrics, preds, labels, metadata_rows
 
 
-def _save_checkpoint(path: Path, model, optimizer, scheduler, epoch: int, args, manifest: dict, feature_dim_list, best_metric: float):
+def _save_checkpoint(path: Path, model, optimizer, epoch: int, args, manifest: dict, feature_dim_list, best_metric: float):
     payload = {
         "epoch": int(epoch),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
         "args": vars(args),
         "cache_manifest": manifest,
         "feature_dim_list": feature_dim_list,
@@ -194,15 +164,6 @@ def main():
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=3e-4)
-    parser.add_argument("--scheduler", choices=["none", "plateau", "cosine"], default="cosine")
-    parser.add_argument("--lr_decay_factor", type=float, default=0.5)
-    parser.add_argument("--lr_decay_patience", type=int, default=5)
-    parser.add_argument("--min_lr", type=float, default=1e-6)
-    parser.add_argument("--lr_warmup_epochs", type=int, default=3)
-    parser.add_argument("--lr_warmup_start_factor", type=float, default=0.1)
-    parser.add_argument("--clip_grad", type=float, default=1.0)
-    parser.add_argument("--patience", type=int, default=20)
-    parser.add_argument("--min_delta", type=float, default=0.0)
     parser.add_argument("--hidden", type=int, default=32)
     parser.add_argument("--num_layers", type=int, default=3)
     parser.add_argument("--kernel_size", type=int, default=9)
@@ -320,13 +281,11 @@ def main():
 
     criterion = torch.nn.MSELoss(reduction="mean")
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = _build_scheduler(optimizer, args)
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and amp_dtype == torch.float16))
 
     best_state = None
     best_metric = float("inf")
     best_epoch = -1
-    bad_epochs = 0
     started = time.time()
     log_path = out_dir / "logfile.csv"
 
@@ -345,15 +304,10 @@ def main():
                 loss = criterion(outputs, labels)
             if scaler.is_enabled():
                 scaler.scale(loss).backward()
-                if args.clip_grad > 0:
-                    scaler.unscale_(optimizer)
-                    clip_grad_norm_(model.parameters(), args.clip_grad)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
-                if args.clip_grad > 0:
-                    clip_grad_norm_(model.parameters(), args.clip_grad)
                 optimizer.step()
             batch_size = int(labels.numel())
             train_loss_sum += float(loss.item()) * batch_size
@@ -363,12 +317,6 @@ def main():
         train_loss = train_loss_sum / max(1, train_examples)
         val_metrics, _, _, _ = evaluate(model, val_loader, device=device, amp_dtype=amp_dtype)
         test_metrics, _, _, _ = evaluate(model, test_loader, device=device, amp_dtype=amp_dtype)
-
-        if scheduler is not None:
-            if args.scheduler == "plateau":
-                scheduler.step(val_metrics["rmse"])
-            else:
-                scheduler.step()
 
         row = {
             "epoch": epoch,
@@ -383,17 +331,13 @@ def main():
         }
         append_csv_row(log_path, row)
 
-        improved = (best_metric - val_metrics["rmse"]) > args.min_delta
-        if improved:
+        if val_metrics["rmse"] <= best_metric:
             best_metric = float(val_metrics["rmse"])
             best_epoch = epoch
-            bad_epochs = 0
             best_state = copy.deepcopy(model.state_dict())
-            _save_checkpoint(out_dir / "bestmodel.pt", model, optimizer, scheduler, epoch, args, manifest, feature_dim_list, best_metric)
-        else:
-            bad_epochs += 1
+            _save_checkpoint(out_dir / "bestmodel.pt", model, optimizer, epoch, args, manifest, feature_dim_list, best_metric)
 
-        _save_checkpoint(out_dir / "checkpoint_last.pt", model, optimizer, scheduler, epoch, args, manifest, feature_dim_list, best_metric)
+        _save_checkpoint(out_dir / "checkpoint_last.pt", model, optimizer, epoch, args, manifest, feature_dim_list, best_metric)
         print(
             json.dumps(
                 {
@@ -407,9 +351,6 @@ def main():
             ),
             flush=True,
         )
-        if args.patience > 0 and bad_epochs >= args.patience:
-            print(f"Early stopping at epoch {epoch} after {bad_epochs} non-improving epochs.", flush=True)
-            break
 
     if best_state is None:
         best_state = model.state_dict()

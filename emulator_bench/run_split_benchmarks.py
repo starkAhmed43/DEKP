@@ -120,24 +120,6 @@ def _run_training(job, seed, args, hparams):
         str(float(hparams.get("lr", args.lr))),
         "--weight_decay",
         str(float(hparams.get("weight_decay", args.weight_decay))),
-        "--scheduler",
-        str(hparams.get("scheduler", args.scheduler)),
-        "--lr_decay_factor",
-        str(float(hparams.get("lr_decay_factor", args.lr_decay_factor))),
-        "--lr_decay_patience",
-        str(int(hparams.get("lr_decay_patience", args.lr_decay_patience))),
-        "--min_lr",
-        str(float(hparams.get("min_lr", args.min_lr))),
-        "--lr_warmup_epochs",
-        str(int(hparams.get("lr_warmup_epochs", args.lr_warmup_epochs))),
-        "--lr_warmup_start_factor",
-        str(float(hparams.get("lr_warmup_start_factor", args.lr_warmup_start_factor))),
-        "--clip_grad",
-        str(float(hparams.get("clip_grad", args.clip_grad))),
-        "--patience",
-        str(int(hparams.get("patience", args.patience))),
-        "--min_delta",
-        str(float(hparams.get("min_delta", args.min_delta))),
         "--hidden",
         str(args.hidden),
         "--num_layers",
@@ -197,15 +179,6 @@ def main():
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=3e-4)
-    parser.add_argument("--scheduler", choices=["none", "plateau", "cosine"], default="cosine")
-    parser.add_argument("--lr_decay_factor", type=float, default=0.5)
-    parser.add_argument("--lr_decay_patience", type=int, default=5)
-    parser.add_argument("--min_lr", type=float, default=1e-6)
-    parser.add_argument("--lr_warmup_epochs", type=int, default=3)
-    parser.add_argument("--lr_warmup_start_factor", type=float, default=0.1)
-    parser.add_argument("--clip_grad", type=float, default=1.0)
-    parser.add_argument("--patience", type=int, default=20)
-    parser.add_argument("--min_delta", type=float, default=0.0)
     parser.add_argument("--hidden", type=int, default=32)
     parser.add_argument("--num_layers", type=int, default=3)
     parser.add_argument("--kernel_size", type=int, default=9)

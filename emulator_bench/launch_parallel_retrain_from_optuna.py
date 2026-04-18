@@ -7,8 +7,6 @@ import sys
 import threading
 from pathlib import Path
 
-import optuna
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -20,28 +18,33 @@ from emulator_bench.run_split_benchmarks import maybe_cache_embeddings
 TRAIN_SCRIPT = REPO_ROOT / "emulator_bench" / "train_single_target_tvt.py"
 
 
-def _load_best_hparams(args):
-    if args.hparams_json:
-        with open(args.hparams_json, "r", encoding="utf-8") as handle:
-            return json.load(handle)
-    if not args.storage:
-        raise ValueError("Provide either --hparams_json or --storage.")
-    study = optuna.load_study(study_name=args.study_name, storage=args.storage)
-    payload = dict(study.best_params)
-    payload["best_trial_number"] = int(study.best_trial.number)
-    payload["best_value"] = float(study.best_value)
+def _load_config_payload(config_path: str | None) -> dict:
+    if not config_path:
+        return {}
+    with open(config_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("Config JSON must contain a top-level object.")
     return payload
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Retrain DEKP across splits/seeds in parallel from Optuna best params.")
-    parser.add_argument("--gpus", nargs="+", required=True)
-    parser.add_argument("--base_dir", type=str, required=True)
-    parser.add_argument("--cache_dir", type=str, required=True)
+    parser.add_argument("--config_json", type=str, default=None)
+    parser.add_argument("--gpus", nargs="+", default=None)
+    parser.add_argument("--jobs_per_gpu", type=int, default=1)
+    parser.add_argument(
+        "--trials_per_gpu",
+        dest="jobs_per_gpu",
+        type=int,
+        help="Alias for --jobs_per_gpu kept for compatibility with older commands.",
+    )
+    parser.add_argument("--base_dir", type=str, default=None)
+    parser.add_argument("--cache_dir", type=str, default=None)
     parser.add_argument("--split_groups", nargs="+", default=DEFAULT_SPLIT_GROUPS)
     parser.add_argument("--threshold", type=str, default=None)
     parser.add_argument("--thresholds", nargs="+", default=None)
-    parser.add_argument("--feature_list", type=str, required=True)
+    parser.add_argument("--feature_list", type=str, default=None)
     parser.add_argument("--seeds", nargs="+", type=int, default=[3407])
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--device", type=str, default="cuda:0")
@@ -58,8 +61,9 @@ def main():
     parser.add_argument("--num_layers", type=int, default=3)
     parser.add_argument("--kernel_size", type=int, default=9)
     parser.add_argument("--dropout", type=float, default=0.5)
-    parser.add_argument("--patience", type=int, default=20)
-    parser.add_argument("--min_delta", type=float, default=0.0)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight_decay", type=float, default=3e-4)
     parser.add_argument("--hparams_json", type=str, default=None)
     parser.add_argument("--study_name", type=str, default="dekp_optuna")
     parser.add_argument("--storage", type=str, default=None)
@@ -87,7 +91,43 @@ def main():
     parser.add_argument("--protein_id_col", type=str, default=None)
     parser.add_argument("--structure_id_col", type=str, default=None)
     parser.add_argument("--target_col", type=str, default=None)
-    args = parser.parse_args()
+    return parser
+
+
+def _load_best_hparams(args):
+    payload = {}
+    if args.storage:
+        import optuna
+
+        study = optuna.load_study(study_name=args.study_name, storage=args.storage)
+        payload.update(study.best_params)
+        payload["best_trial_number"] = int(study.best_trial.number)
+        payload["best_value"] = float(study.best_value)
+    if args.hparams_json:
+        with open(args.hparams_json, "r", encoding="utf-8") as handle:
+            json_payload = json.load(handle)
+        if not isinstance(json_payload, dict):
+            raise ValueError("Hyperparameter JSON must contain a top-level object.")
+        payload.update(json_payload)
+    payload.setdefault("batch_size", int(args.batch_size))
+    payload.setdefault("lr", float(args.lr))
+    payload.setdefault("weight_decay", float(args.weight_decay))
+    payload.setdefault("dropout", float(args.dropout))
+    return payload
+
+
+def main():
+    parser = _build_parser()
+    bootstrap_args, remaining_argv = parser.parse_known_args()
+    config_payload = _load_config_payload(bootstrap_args.config_json)
+    parser.set_defaults(**config_payload)
+    args = parser.parse_args(remaining_argv)
+
+    missing = [name for name in ["gpus", "base_dir", "cache_dir", "feature_list"] if getattr(args, name) in (None, [], "")]
+    if missing:
+        parser.error(f"Missing required arguments (via CLI or --config_json): {', '.join(missing)}")
+    if int(args.jobs_per_gpu) < 1:
+        parser.error("--jobs_per_gpu must be at least 1.")
 
     args.thresholds = normalize_threshold_args(args.thresholds, args.threshold)
     maybe_cache_embeddings(args)
@@ -103,7 +143,7 @@ def main():
 
     failures = []
 
-    def worker(gpu_id: str):
+    def worker(gpu_id: str, slot_idx: int):
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_id
         while True:
@@ -133,31 +173,13 @@ def main():
                 "--feature_list",
                 args.feature_list,
                 "--batch_size",
-                str(int(best_hparams.get("batch_size", 128))),
+                str(int(best_hparams["batch_size"])),
                 "--epochs",
                 str(args.epochs),
                 "--lr",
-                str(float(best_hparams.get("lr", 1e-3))),
+                str(float(best_hparams["lr"])),
                 "--weight_decay",
-                str(float(best_hparams.get("weight_decay", 3e-4))),
-                "--scheduler",
-                str(best_hparams.get("scheduler", "cosine")),
-                "--lr_decay_factor",
-                str(float(best_hparams.get("lr_decay_factor", 0.5))),
-                "--lr_decay_patience",
-                str(int(best_hparams.get("lr_decay_patience", 5))),
-                "--min_lr",
-                str(float(best_hparams.get("min_lr", 1e-6))),
-                "--lr_warmup_epochs",
-                str(int(best_hparams.get("lr_warmup_epochs", 3))),
-                "--lr_warmup_start_factor",
-                str(float(best_hparams.get("lr_warmup_start_factor", 0.1))),
-                "--clip_grad",
-                str(float(best_hparams.get("clip_grad", 1.0))),
-                "--patience",
-                str(int(best_hparams.get("patience", args.patience))),
-                "--min_delta",
-                str(float(best_hparams.get("min_delta", args.min_delta))),
+                str(float(best_hparams["weight_decay"])),
                 "--hidden",
                 str(args.hidden),
                 "--num_layers",
@@ -165,7 +187,7 @@ def main():
                 "--kernel_size",
                 str(args.kernel_size),
                 "--dropout",
-                str(float(best_hparams.get("dropout", args.dropout))),
+                str(float(best_hparams["dropout"])),
                 "--device",
                 "cuda:0",
                 "--num_workers",
@@ -195,10 +217,13 @@ def main():
                 cmd.append("--compile_model")
             return_code = subprocess.call(cmd, cwd=str(REPO_ROOT), env=env)
             if return_code != 0:
-                failures.append((gpu_id, job["split_group"], job["split_name"], seed, return_code))
+                failures.append((gpu_id, slot_idx, job["split_group"], job["split_name"], seed, return_code))
             work_queue.task_done()
 
-    threads = [threading.Thread(target=worker, args=(gpu_id,), daemon=True) for gpu_id in args.gpus]
+    threads = []
+    for gpu_id in args.gpus:
+        for slot_idx in range(int(args.jobs_per_gpu)):
+            threads.append(threading.Thread(target=worker, args=(gpu_id, slot_idx), daemon=True))
     for thread in threads:
         thread.start()
     for thread in threads:
