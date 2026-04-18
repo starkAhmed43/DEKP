@@ -9,6 +9,7 @@ from emulator_bench.common import (
     ligand_cache_path,
     normalize_sequence,
     protein_cache_path,
+    protein_sequence_cache_max_len,
     structure_cache_path,
 )
 
@@ -43,13 +44,14 @@ class ProteinEmbeddingStore(_LRUStore):
         super().__init__(max_items=max_items)
         self.cache_dir = Path(cache_dir)
         self.max_len = max_len
+        self.cache_key_max_len = protein_sequence_cache_max_len(max_len)
         if preload and sequences is not None:
-            for sequence in sorted({normalize_sequence(sequence, max_len=max_len) for sequence in sequences}):
+            for sequence in sorted({normalize_sequence(sequence, max_len=self.cache_key_max_len) for sequence in sequences}):
                 self.get(sequence)
 
     def get(self, sequence: str):
-        normalized = normalize_sequence(sequence, max_len=self.max_len)
-        path = protein_cache_path(self.cache_dir, normalized, max_len=self.max_len)
+        normalized = normalize_sequence(sequence, max_len=self.cache_key_max_len)
+        path = protein_cache_path(self.cache_dir, normalized, max_len=self.cache_key_max_len)
         if not path.exists():
             raise FileNotFoundError(f"Missing cached protein payload: {path}")
         return self._get_or_load(normalized, path)

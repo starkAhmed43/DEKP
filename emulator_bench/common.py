@@ -45,6 +45,10 @@ def normalize_sequence(sequence: str, max_len: int = 2500) -> str:
     return seq.replace("U", "X").replace("Z", "X").replace("O", "X").replace("B", "X").replace("*", "")
 
 
+def protein_sequence_cache_max_len(token_max_len: int, special_tokens: int = 2) -> int:
+    return max(1, int(token_max_len) - int(special_tokens))
+
+
 def normalize_smiles(smiles: str) -> str:
     return str(smiles).strip()
 

@@ -31,6 +31,7 @@ from emulator_bench.common import (
     ligand_cache_path,
     load_json,
     protein_cache_path,
+    protein_sequence_cache_max_len,
     read_table,
     regression_metrics,
     resolve_single_split_job,
@@ -174,6 +175,7 @@ def _filter_missing_cache_rows(frame: pd.DataFrame, split_name: str, resolved_co
     protein_id_col = resolved_columns["protein_id_col"]
     structure_id_col = resolved_columns["structure_id_col"]
     protein_max_len = int(manifest["protein_max_len"])
+    protein_cache_max_len = protein_sequence_cache_max_len(protein_max_len)
 
     keep_mask = []
     missing_protein_ids = []
@@ -189,7 +191,7 @@ def _filter_missing_cache_rows(frame: pd.DataFrame, split_name: str, resolved_co
         else:
             structure_id = str(structure_value).strip()
 
-        protein_path = protein_cache_path(cache_dir, sequence=sequence, max_len=protein_max_len)
+        protein_path = protein_cache_path(cache_dir, sequence=sequence, max_len=protein_cache_max_len)
         ligand_path = ligand_cache_path(cache_dir, smiles=smiles)
         structure_path = structure_cache_path(cache_dir, structure_id=structure_id, fallback_sequence=sequence)
 
