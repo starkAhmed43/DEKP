@@ -1,7 +1,6 @@
 import argparse
-import copy
+import gc
 import json
-import math
 import sys
 import time
 from contextlib import nullcontext
@@ -60,14 +59,31 @@ def _autocast_context(device: torch.device, amp_dtype):
     return nullcontext()
 
 
+def _worker_init_fn(worker_id: int) -> None:
+    # Each structure cache file is ~4 MB. With the default LRU (cache_items) and
+    # prefetch_factor the DataLoader can hold many GB of graph tensors simultaneously.
+    # Run Python's cyclic GC more aggressively in workers so that any Python-level
+    # cycles (e.g. from future torch_geometric upgrades) don't accumulate.
+    import gc as _gc
+    _gc.set_threshold(100, 5, 2)
+
+
 def _resolve_columns(frame: pd.DataFrame, manifest: dict, args):
     resolved = manifest.get("resolved_columns", {})
+    pdb_record_col = resolved.get("pdb_record_col") or ("pdbs" if "pdbs" in frame.columns else None)
+    manifest_structure_id = resolved.get("structure_id_col")
+    if manifest_structure_id == resolved.get("sequence_col"):
+        manifest_structure_id = None  # was a sequence fallback in the manifest, not a real structure column
+    structure_id_col = find_first_existing_column(frame, COMMON_STRUCTURE_ID_COLS, explicit=args.structure_id_col or manifest_structure_id, required=False)
+    if structure_id_col is None and pdb_record_col:
+        structure_id_col = pdb_record_col
     return {
         "sequence_col": find_first_existing_column(frame, COMMON_SEQUENCE_COLS, explicit=args.sequence_col or resolved.get("sequence_col"), required=True),
         "smiles_col": find_first_existing_column(frame, COMMON_SMILES_COLS, explicit=args.smiles_col or resolved.get("smiles_col"), required=True),
         "protein_id_col": find_first_existing_column(frame, COMMON_PROTEIN_ID_COLS, explicit=args.protein_id_col or resolved.get("protein_id_col"), required=False),
-        "structure_id_col": find_first_existing_column(frame, COMMON_STRUCTURE_ID_COLS, explicit=args.structure_id_col or resolved.get("structure_id_col"), required=False),
+        "structure_id_col": structure_id_col,
         "target_col": find_first_existing_column(frame, COMMON_TARGET_COLS, explicit=args.target_col or resolved.get("target_col"), required=True),
+        "pdb_record_col": pdb_record_col,
     }
 
 
@@ -84,6 +100,7 @@ def _make_loader(dataset, batch_size, shuffle, args):
     if args.num_workers > 0:
         kwargs["persistent_workers"] = args.persistent_workers
         kwargs["prefetch_factor"] = args.prefetch_factor
+        kwargs["worker_init_fn"] = _worker_init_fn
     return DataLoader(**kwargs)
 
 
@@ -185,8 +202,8 @@ def _filter_missing_cache_rows(frame: pd.DataFrame, split_name: str, resolved_co
         sequence = str(row[sequence_col])
         smiles = str(row[resolved_columns["smiles_col"]])
         protein_id = str(row[protein_id_col])
-        structure_value = row[structure_id_col] if structure_id_col in row.index else protein_id
-        if pd.isna(structure_value) or str(structure_value).strip() == "":
+        structure_value = row[structure_id_col] if structure_id_col in row.index else None
+        if structure_value is None or pd.isna(structure_value) or str(structure_value).strip().lower() in ("", "nan", "none"):
             structure_id = protein_id
         else:
             structure_id = str(structure_value).strip()
@@ -258,13 +275,13 @@ def main():
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--num_workers", type=int, default=8)
-    parser.add_argument("--prefetch_factor", type=int, default=4)
+    parser.add_argument("--prefetch_factor", type=int, default=2)
     parser.add_argument("--persistent_workers", action="store_true")
     parser.add_argument("--pin_memory", action="store_true")
     parser.add_argument("--preload_proteins", action="store_true")
     parser.add_argument("--preload_ligands", action="store_true")
     parser.add_argument("--preload_structures", action="store_true")
-    parser.add_argument("--cache_items", type=int, default=512)
+    parser.add_argument("--cache_items", type=int, default=64)
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--compile_model", action="store_true")
     args = parser.parse_args()
@@ -401,9 +418,6 @@ def main():
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and amp_dtype == torch.float16))
 
-    best_state = None
-    best_metric = float("inf")
-    best_epoch = -1
     started = time.time()
     log_path = out_dir / "logfile.csv"
 
@@ -411,6 +425,7 @@ def main():
         model.train()
         train_loss_sum = 0.0
         train_examples = 0
+        batch_count = 0
         iterator = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", unit="batch")
         for graph_batch, protein_tokens, smiles_tokens, features, labels, _ in iterator:
             graph_batch, protein_tokens, smiles_tokens, features, labels = _move_batch(
@@ -430,53 +445,29 @@ def main():
             batch_size = int(labels.numel())
             train_loss_sum += float(loss.item()) * batch_size
             train_examples += batch_size
+            batch_count += 1
+            if batch_count % 100 == 0:
+                gc.collect()
             iterator.set_postfix(loss=f"{(train_loss_sum / max(1, train_examples)):.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
+        del iterator
 
         train_loss = train_loss_sum / max(1, train_examples)
-        val_metrics, _, _, _ = evaluate(model, val_loader, device=device, amp_dtype=amp_dtype)
-
         row = {
             "epoch": epoch,
             "train_loss": train_loss,
-            "val_loss": val_metrics["loss"],
-            "val_rmse": val_metrics["rmse"],
-            "val_r2": val_metrics["r2"],
-            "val_mae": val_metrics["mae"],
-            "val_pearson": val_metrics["pearson"],
             "lr": optimizer.param_groups[0]["lr"],
         }
         append_csv_row(log_path, row)
 
-        if val_metrics["rmse"] <= best_metric:
-            best_metric = float(val_metrics["rmse"])
-            best_epoch = epoch
-            best_state = copy.deepcopy(model.state_dict())
-            _save_checkpoint(out_dir / "bestmodel.pt", model, optimizer, epoch, args, manifest, feature_dim_list, best_metric)
-
         if epoch % 10 == 0 or epoch == args.epochs:
-            _save_checkpoint(out_dir / "checkpoint_last.pt", model, optimizer, epoch, args, manifest, feature_dim_list, best_metric)
-        print(
-            json.dumps(
-                {
-                    "epoch": epoch,
-                    "train_loss": train_loss,
-                    "val_rmse": val_metrics["rmse"],
-                    "best_val_rmse": best_metric,
-                    "amp": amp_name,
-                }
-            ),
-            flush=True,
-        )
+            _save_checkpoint(out_dir / "checkpoint_last.pt", model, optimizer, epoch, args, manifest, feature_dim_list, float("nan"))
+        gc.collect()
 
-    if best_state is None:
-        best_state = model.state_dict()
-    model.load_state_dict(best_state)
     val_metrics, val_preds, val_labels, val_metadata = evaluate(model, val_loader, device=device, amp_dtype=amp_dtype)
     test_metrics, test_preds, test_labels, test_metadata = evaluate(model, test_loader, device=device, amp_dtype=amp_dtype)
     final_summary = {
         "task_name": args.task_name,
         "seed": args.seed,
-        "best_epoch": int(best_epoch),
         "amp_mode": amp_name,
         "elapsed_seconds": time.time() - started,
         "feature_list": ",".join(args.feature_list),

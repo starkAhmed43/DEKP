@@ -40,6 +40,19 @@ def _stable_hash(text: str) -> str:
     return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
 
 
+def canonical_pdb_identity(pdb_type, pdb_source, pdb_record, structure_id, protein_id) -> Optional[str]:
+    pdb_type_value = str(pdb_type or "").strip().lower()
+    pdb_source_value = str(pdb_source or "").strip().lower()
+    pdb_record_value = str(pdb_record or "").strip()
+    structure_id_value = str(structure_id or "").strip()
+    protein_id_value = str(protein_id or "").strip()
+    pdb_key = pdb_record_value or structure_id_value or protein_id_value
+    if not pdb_key:
+        return None
+    return f"{pdb_type_value}::{pdb_source_value}::{pdb_key}"
+
+
+
 def normalize_sequence(sequence: str, max_len: int = 2500) -> str:
     seq = str(sequence).strip().upper()[:max_len]
     return seq.replace("U", "X").replace("Z", "X").replace("O", "X").replace("B", "X").replace("*", "")

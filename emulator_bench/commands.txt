@@ -1,7 +1,7 @@
 python emulator_bench/cache_embeddings.py \
   --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
   --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
-  --dataset_df_path ~/github/EMULaToR/data/processed/baselines/DEKP/km_kinetic_params_3d.parquet \
+  --dataset_df_path ~/github/EMULaToR/data/processed/baselines/DEKP/km_kinetic_params_3d_aligned.parquet \
   --feature_list trfm,t5 \
   --experimental_pdb_dir ~/github/EMULaToR/data/intermediate/processed_exp_pdb \
   --alphafold_pdb_dir ~/github/EMULaToR/data/intermediate/alphafold \
@@ -15,11 +15,12 @@ python emulator_bench/train_single_target_tvt.py \
   --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
   --out_dir ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits/dekp_results/seed_3407 \
   --feature_list trfm,t5 \
-  --batch_size 128 \
+  --batch_size 64 \
   --epochs 80 \
   --device cuda:0 \
   --num_workers 8 \
-  --prefetch_factor 4 \
+  --prefetch_factor 2 \
+  --cache_items 64 \
   --pin_memory \
   --persistent_workers
 
@@ -33,7 +34,8 @@ python emulator_bench/run_split_benchmarks.py \
   --seeds 3407 \
   --device cuda:0 \
   --num_workers 8 \
-  --prefetch_factor 4 \
+  --prefetch_factor 2 \
+  --cache_items 64 \
   --pin_memory \
   --persistent_workers
 
@@ -50,7 +52,8 @@ python emulator_bench/tune_optuna.py \
   --n_trials 20 \
   --device cuda:0 \
   --num_workers 8 \
-  --prefetch_factor 4 \
+  --prefetch_factor 2 \
+  --cache_items 64 \
   --pin_memory \
   --persistent_workers \
   --storage sqlite:////tmp/dekp_optuna.db
@@ -82,20 +85,23 @@ python emulator_bench/launch_parallel_retrain_from_optuna.py \
   --esm3_pdb_dir /path/to/esm3_pdbs \
   --split_groups enzyme_sequence_splits substrate_splits random_splits \
   --seeds 3407 \
+  --num_workers 8 \
+  --prefetch_factor 2 \
+  --cache_items 64 \
   --pin_memory \
   --persistent_workers
 
 python emulator_bench/launch_parallel_retrain_from_optuna.py \
   --gpus 0 \
-  --trials_per_gpu 3 \
+  --trials_per_gpu 1 \
   --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
   --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
   --config_json emulator_bench/configs/fine_tune_defaults.json \
-  --split_groups enzyme_sequence_splits substrate_splits \
-  --thresholds threshold_0.3 threshold_0.6 \
+  --split_groups enzyme_sequence_splits substrate_splits enzyme_structure_splits conformer_cosine_splits random_splits uniprot_time_splits \
   --hparams_json emulator_bench/configs/fine_tune_defaults.json \
-  --seeds 3407 3408 3409 \
-  --num_workers 4 \
-  --prefetch_factor 4 \
+  --seeds 666 777 888 \
+  --num_workers 8 \
+  --prefetch_factor 2 \
+  --cache_items 64 \
   --pin_memory \
   --persistent_workers

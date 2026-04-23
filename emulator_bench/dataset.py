@@ -2,6 +2,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+import math
 import pandas as pd
 import torch
 
@@ -144,7 +145,11 @@ class CachedDEKPDataset(torch.utils.data.Dataset):
         sequence = str(row[self.sequence_col])
         smiles = str(row[self.smiles_col])
         protein_id = str(row[self.protein_id_col])
-        structure_id = str(row[self.structure_id_col]) if self.structure_id_col in row.index else protein_id
+        raw_struct = row[self.structure_id_col] if self.structure_id_col in row.index else None
+        if raw_struct is None or (isinstance(raw_struct, float) and math.isnan(raw_struct)) or str(raw_struct).strip().lower() in ("", "nan", "none"):
+            structure_id = protein_id
+        else:
+            structure_id = str(raw_struct).strip()
 
         protein_payload = self.protein_store.get(sequence)
         ligand_payload = self.ligand_store.get(smiles)

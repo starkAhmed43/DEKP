@@ -25,6 +25,7 @@ from emulator_bench.common import (
     DEFAULT_CACHE_DIR,
     DEFAULT_FEATURES,
     DEFAULT_SPLIT_GROUPS,
+    canonical_pdb_identity,
     discover_split_jobs,
     find_first_existing_column,
     normalize_sequence,
@@ -87,17 +88,6 @@ def _cleanup_torch_memory(device: torch.device | str | None = None) -> None:
     if device_str.startswith("cuda") and torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-
-def _canonical_pdb_identity(pdb_type, pdb_source, pdb_record, structure_id, protein_id):
-    pdb_type_value = str(pdb_type or "").strip().lower()
-    pdb_source_value = str(pdb_source or "").strip().lower()
-    pdb_record_value = str(pdb_record or "").strip()
-    structure_id_value = str(structure_id or "").strip()
-    protein_id_value = str(protein_id or "").strip()
-    pdb_key = pdb_record_value or structure_id_value or protein_id_value
-    if not pdb_key:
-        return None
-    return f"{pdb_type_value}::{pdb_source_value}::{pdb_key}"
 
 
 def _normalize_series(series: pd.Series) -> pd.Series:
@@ -284,7 +274,7 @@ def _scan_split_file(payload: dict) -> dict:
         pdb_record = None
         if pdb_record_col and pdb_record_col in row.index:
             pdb_record = row[pdb_record_col]
-        pdb_identity = _canonical_pdb_identity(pdb_type, pdb_source, pdb_record, structure_id, protein_id)
+        pdb_identity = canonical_pdb_identity(pdb_type, pdb_source, pdb_record, structure_id, protein_id)
 
         if sequence not in unique_sequences:
             unique_sequences[sequence] = {
@@ -297,9 +287,10 @@ def _scan_split_file(payload: dict) -> dict:
                 "smiles": smiles,
                 "cid": cid_value,
             }
+        pdb_key = str(pdb_record or structure_id or protein_id).strip()
         if pdb_identity and pdb_identity not in unique_structures:
             unique_structures[pdb_identity] = {
-                "structure_id": pdb_identity,
+                "structure_id": pdb_key,
                 "protein_id": protein_id,
                 "sequence": sequence,
                 "pdb_type": pdb_type,
