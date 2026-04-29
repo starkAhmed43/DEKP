@@ -93,13 +93,13 @@ python emulator_bench/launch_parallel_retrain_from_optuna.py \
 
 python emulator_bench/launch_parallel_retrain_from_optuna.py \
   --gpus 0 \
-  --trials_per_gpu 1 \
+  --trials_per_gpu 2 \
   --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
   --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
   --config_json emulator_bench/configs/fine_tune_defaults.json \
   --split_groups enzyme_sequence_splits substrate_splits enzyme_structure_splits conformer_cosine_splits random_splits uniprot_time_splits \
   --hparams_json emulator_bench/configs/fine_tune_defaults.json \
-  --seeds 666 777 888 \
+  --seeds 666 777 888  \
   --num_workers 8 \
   --prefetch_factor 2 \
   --cache_items 64 \
