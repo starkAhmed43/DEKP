@@ -9,11 +9,11 @@ python emulator_bench/cache_embeddings.py \
   --device cuda:0
 
 python emulator_bench/train_single_target_tvt.py \
-  --train_path ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits/train.parquet \
-  --val_path ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits/val.parquet \
-  --test_path ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits/test.parquet \
+  --train_path ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits_grouped_sequence/train.parquet \
+  --val_path ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits_grouped_sequence/val.parquet \
+  --test_path ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits_grouped_sequence/test.parquet \
   --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
-  --out_dir ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits/dekp_results/seed_3407 \
+  --out_dir ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits_grouped_sequence/dekp_results/seed_3407 \
   --feature_list trfm,t5 \
   --batch_size 64 \
   --epochs 80 \
@@ -83,7 +83,7 @@ python emulator_bench/launch_parallel_retrain_from_optuna.py \
   --experimental_pdb_dir /path/to/experimental_pdbs \
   --alphafold_pdb_dir /path/to/alphafold_pdbs \
   --esm3_pdb_dir /path/to/esm3_pdbs \
-  --split_groups enzyme_sequence_splits substrate_splits random_splits \
+  --split_groups enzyme_sequence_splits substrate_splits random_splits_grouped_sequence random_splits_grouped_smiles \
   --seeds 3407 \
   --num_workers 8 \
   --prefetch_factor 2 \
@@ -97,7 +97,7 @@ python emulator_bench/launch_parallel_retrain_from_optuna.py \
   --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
   --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
   --config_json emulator_bench/configs/fine_tune_defaults.json \
-  --split_groups enzyme_sequence_splits substrate_splits enzyme_structure_splits conformer_cosine_splits random_splits uniprot_time_splits \
+  --split_groups random_splits_grouped_smiles \
   --hparams_json emulator_bench/configs/fine_tune_defaults.json \
   --seeds 666 777 888  \
   --num_workers 8 \

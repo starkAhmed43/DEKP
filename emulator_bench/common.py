@@ -21,7 +21,8 @@ if str(REPO_ROOT) not in sys.path:
 DEFAULT_BASE_DIR = Path("~/github/EMULaToR/data/processed/baselines/DEKP").expanduser()
 DEFAULT_CACHE_DIR = DEFAULT_BASE_DIR / "embeddings"
 DEFAULT_SPLIT_GROUPS = [
-    "random_splits",
+    "random_splits_grouped_sequence",
+    "random_splits_grouped_smiles",
     "enzyme_sequence_splits",
     "substrate_splits",
     "group_shuffle_splits",
