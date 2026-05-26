@@ -13,7 +13,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from emulator_bench.common import DEFAULT_BASE_DIR, DEFAULT_CACHE_DIR, DEFAULT_FEATURES, DEFAULT_SPLIT_GROUPS, discover_split_jobs, normalize_threshold_args, resolve_metric_value
+from emulator_bench.common import (
+    DEFAULT_BASE_DIR,
+    DEFAULT_CACHE_DIR,
+    DEFAULT_FEATURES,
+    DEFAULT_SPLIT_GROUPS,
+    apply_manifest_paths_to_jobs,
+    discover_split_jobs,
+    normalize_threshold_args,
+    resolve_metric_value,
+)
 from emulator_bench.run_split_benchmarks import maybe_cache_embeddings
 
 
@@ -143,6 +152,7 @@ def main():
     parser = argparse.ArgumentParser(description="Tune DEKP optimizer hyperparameters with Optuna.")
     parser.add_argument("--base_dir", type=str, default=str(DEFAULT_BASE_DIR))
     parser.add_argument("--cache_dir", type=str, default=str(DEFAULT_CACHE_DIR))
+    parser.add_argument("--manifests_dir", type=str, default=None)
     parser.add_argument("--split_groups", nargs="+", default=DEFAULT_SPLIT_GROUPS)
     parser.add_argument("--threshold", type=str, default=None)
     parser.add_argument("--thresholds", nargs="+", default=None)
@@ -203,6 +213,8 @@ def main():
     jobs = discover_split_jobs(Path(args.base_dir), split_groups=args.split_groups, thresholds=args.thresholds)
     if not jobs:
         raise FileNotFoundError(f"No split jobs discovered in {args.base_dir}")
+    if args.manifests_dir:
+        jobs = apply_manifest_paths_to_jobs(jobs, Path(args.manifests_dir).expanduser(), require=True)
 
     sampler = optuna.samplers.TPESampler(seed=args.sampler_seed)
     study_kwargs = {

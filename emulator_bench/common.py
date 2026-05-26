@@ -2,6 +2,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import random
 import sys
 from collections import defaultdict
@@ -20,14 +21,19 @@ if str(REPO_ROOT) not in sys.path:
 
 DEFAULT_BASE_DIR = Path("~/github/EMULaToR/data/processed/baselines/DEKP").expanduser()
 DEFAULT_CACHE_DIR = DEFAULT_BASE_DIR / "embeddings"
+DEFAULT_MANIFESTS_DIR = DEFAULT_BASE_DIR / "dekp_manifests"
 DEFAULT_SPLIT_GROUPS = [
     "random_splits_grouped_sequence",
     "random_splits_grouped_smiles",
     "enzyme_sequence_splits",
+    "enzyme_structure_splits",
     "substrate_splits",
+    "conformer_cosine_splits",
+    "uniprot_time_splits",
     "group_shuffle_splits",
 ]
 DEFAULT_FEATURES = ["trfm", "t5"]
+KEY_COLUMNS = ["smiles", "sequence", "value", "smiles_hash", "uniprot_date", "log10_value"]
 
 COMMON_SEQUENCE_COLS = ["sequence", "Sequence"]
 COMMON_SMILES_COLS = ["smiles", "Smiles"]
@@ -39,6 +45,10 @@ COMMON_CID_COLS = ["CID", "cid"]
 
 def _stable_hash(text: str) -> str:
     return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+
+
+def stable_hash(text: str) -> str:
+    return _stable_hash(text)
 
 
 def canonical_pdb_identity(pdb_type, pdb_source, pdb_record, structure_id, protein_id) -> Optional[str]:
@@ -121,7 +131,17 @@ def save_json(path: Path, payload: Dict) -> None:
     tmp_path.replace(path)
 
 
-def load_json(path: Path) -> Dict:
+def atomic_json(path: Path, payload: Dict) -> None:
+    ensure_parent(path)
+    tmp_path = Path(f"{path}.tmp.{os.getpid()}")
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+    tmp_path.replace(path)
+
+
+def load_json(path: Path, default=None) -> Dict:
+    if default is not None and not Path(path).exists():
+        return default
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
 
@@ -142,6 +162,25 @@ def read_table(path: Path) -> pd.DataFrame:
         sep = "\t" if suffix == ".tsv" else ","
         return pd.read_csv(path, sep=sep)
     raise ValueError(f"Unsupported table format: {path}")
+
+
+def atomic_table(path: Path, frame: pd.DataFrame) -> None:
+    ensure_parent(path)
+    tmp_path = Path(f"{path}.tmp.{os.getpid()}")
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        frame.to_parquet(tmp_path, index=False)
+    elif suffix == ".csv":
+        frame.to_csv(tmp_path, index=False)
+    elif suffix == ".tsv":
+        frame.to_csv(tmp_path, sep="\t", index=False)
+    else:
+        raise ValueError(f"Unsupported table output format: {path}")
+    tmp_path.replace(path)
+
+
+def write_table(path: Path, frame: pd.DataFrame) -> None:
+    atomic_table(Path(path), frame)
 
 
 def require_columns(df: pd.DataFrame, required: Iterable[str], path: Path) -> None:
@@ -209,6 +248,39 @@ def _find_split_file(directory: Path, stem: str) -> Optional[Path]:
         if candidate.exists():
             return candidate
     return None
+
+
+def split_safe_name(text: str) -> str:
+    return str(text).replace("/", "_").replace(" ", "_")
+
+
+def manifest_path(manifests_dir: Path, job: Dict, split: str) -> Path:
+    return (
+        Path(manifests_dir)
+        / split_safe_name(job["split_group"])
+        / split_safe_name(job["split_name"])
+        / f"{split}.parquet"
+    )
+
+
+def apply_manifest_paths(job: Dict, manifests_dir: Path, require: bool = True) -> Dict:
+    out = dict(job)
+    for split in ("train", "val", "test"):
+        key = f"{split}_path"
+        original_key = f"original_{key}"
+        path = manifest_path(manifests_dir, job, split)
+        if require and not path.exists():
+            raise FileNotFoundError(
+                f"Missing prepared manifest for {job['split_group']}/{job['split_name']} {split}: {path}. "
+                "Run emulator_bench/prepare_splits.py first."
+            )
+        out[original_key] = job[key]
+        out[key] = str(path)
+    return out
+
+
+def apply_manifest_paths_to_jobs(jobs: Iterable[Dict], manifests_dir: Path, require: bool = True) -> List[Dict]:
+    return [apply_manifest_paths(job, manifests_dir, require=require) for job in jobs]
 
 
 def _build_split_job(root_dir: Path, split_group: str, split_name: str, difficulty: str) -> Optional[Dict[str, str]]:

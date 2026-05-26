@@ -416,52 +416,59 @@ def main():
 
     criterion = torch.nn.MSELoss(reduction="mean")
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and amp_dtype == torch.float16))
+    scaler_enabled = device.type == "cuda" and amp_dtype == torch.float16
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=scaler_enabled)
 
     started = time.time()
     log_path = out_dir / "logfile.csv"
 
-    for epoch in range(1, args.epochs + 1):
-        model.train()
-        train_loss_sum = 0.0
-        train_examples = 0
-        batch_count = 0
-        iterator = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", unit="batch")
-        for graph_batch, protein_tokens, smiles_tokens, features, labels, _ in iterator:
-            graph_batch, protein_tokens, smiles_tokens, features, labels = _move_batch(
-                graph_batch, protein_tokens, smiles_tokens, features, labels, device
-            )
-            optimizer.zero_grad(set_to_none=True)
-            with _autocast_context(device, amp_dtype):
-                outputs = model(graph_batch, protein_tokens, smiles_tokens, features)
-                loss = criterion(outputs, labels)
-            if scaler.is_enabled():
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                optimizer.step()
-            batch_size = int(labels.numel())
-            train_loss_sum += float(loss.item()) * batch_size
-            train_examples += batch_size
-            batch_count += 1
-            if batch_count % 100 == 0:
-                gc.collect()
-            iterator.set_postfix(loss=f"{(train_loss_sum / max(1, train_examples)):.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
-        del iterator
+    with tqdm(total=args.epochs, desc="Training", unit="epoch", leave=True) as epoch_bar:
+        for epoch in range(1, args.epochs + 1):
+            model.train()
+            train_loss_sum = 0.0
+            train_examples = 0
+            batch_count = 0
+            iterator = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", unit="batch", leave=False)
+            for graph_batch, protein_tokens, smiles_tokens, features, labels, _ in iterator:
+                graph_batch, protein_tokens, smiles_tokens, features, labels = _move_batch(
+                    graph_batch, protein_tokens, smiles_tokens, features, labels, device
+                )
+                optimizer.zero_grad(set_to_none=True)
+                with _autocast_context(device, amp_dtype):
+                    outputs = model(graph_batch, protein_tokens, smiles_tokens, features)
+                    loss = criterion(outputs, labels)
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
+                batch_size = int(labels.numel())
+                train_loss_sum += float(loss.item()) * batch_size
+                train_examples += batch_size
+                batch_count += 1
+                if batch_count % 100 == 0:
+                    gc.collect()
+                iterator.set_postfix(loss=f"{(train_loss_sum / max(1, train_examples)):.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
+            del iterator
 
-        train_loss = train_loss_sum / max(1, train_examples)
-        row = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "lr": optimizer.param_groups[0]["lr"],
-        }
-        append_csv_row(log_path, row)
+            train_loss = train_loss_sum / max(1, train_examples)
+            row = {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "lr": optimizer.param_groups[0]["lr"],
+            }
+            append_csv_row(log_path, row)
 
-        if epoch % 10 == 0 or epoch == args.epochs:
-            _save_checkpoint(out_dir / "checkpoint_last.pt", model, optimizer, epoch, args, manifest, feature_dim_list, float("nan"))
-        gc.collect()
+            if epoch % 10 == 0 or epoch == args.epochs:
+                _save_checkpoint(out_dir / "checkpoint_last.pt", model, optimizer, epoch, args, manifest, feature_dim_list, float("nan"))
+            epoch_bar.set_postfix(loss=f"{train_loss:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
+            epoch_bar.update(1)
+            gc.collect()
 
     val_metrics, val_preds, val_labels, val_metadata = evaluate(model, val_loader, device=device, amp_dtype=amp_dtype)
     test_metrics, test_preds, test_labels, test_metadata = evaluate(model, test_loader, device=device, amp_dtype=amp_dtype)

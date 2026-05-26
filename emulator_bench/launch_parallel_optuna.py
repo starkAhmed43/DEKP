@@ -30,6 +30,7 @@ def main():
     parser.add_argument("--gpus", nargs="+", required=True)
     parser.add_argument("--base_dir", type=str, required=True)
     parser.add_argument("--cache_dir", type=str, required=True)
+    parser.add_argument("--manifests_dir", type=str, default=None)
     parser.add_argument("--split_groups", nargs="+", default=None)
     parser.add_argument("--threshold", type=str, default=None)
     parser.add_argument("--thresholds", nargs="+", default=None)
@@ -138,6 +139,8 @@ def main():
                 "--dropout",
                 str(args.dropout),
             ]
+            if args.manifests_dir:
+                cmd.extend(["--manifests_dir", args.manifests_dir])
             if args.split_groups:
                 cmd.extend(["--split_groups", *args.split_groups])
             if args.thresholds:

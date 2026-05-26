@@ -16,6 +16,7 @@ from emulator_bench.common import (
     DEFAULT_CACHE_DIR,
     DEFAULT_FEATURES,
     DEFAULT_SPLIT_GROUPS,
+    apply_manifest_paths_to_jobs,
     discover_split_jobs,
     metric_sort_ascending,
     normalize_threshold_args,
@@ -56,6 +57,9 @@ def maybe_cache_embeddings(args):
         "--graph_atom_type",
         args.graph_atom_type,
     ]
+    manifests_dir = getattr(args, "manifests_dir", None)
+    if manifests_dir:
+        cmd.extend(["--manifests_dir", str(manifests_dir)])
     if args.split_groups:
         cmd.extend(["--split_groups", *args.split_groups])
     if args.thresholds:
@@ -163,6 +167,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run the DEKP benchmark sweep across EMULaToR split families.")
     parser.add_argument("--base_dir", type=str, default=str(DEFAULT_BASE_DIR))
     parser.add_argument("--cache_dir", type=str, default=str(DEFAULT_CACHE_DIR))
+    parser.add_argument("--manifests_dir", type=str, default=None)
     parser.add_argument("--split_groups", nargs="+", default=DEFAULT_SPLIT_GROUPS)
     parser.add_argument("--threshold", type=str, default=None)
     parser.add_argument("--thresholds", nargs="+", default=None)
@@ -219,6 +224,8 @@ def main():
     jobs = discover_split_jobs(Path(args.base_dir), split_groups=args.split_groups, thresholds=args.thresholds)
     if not jobs:
         raise FileNotFoundError(f"No split jobs discovered in {args.base_dir}")
+    if args.manifests_dir:
+        jobs = apply_manifest_paths_to_jobs(jobs, Path(args.manifests_dir).expanduser(), require=True)
 
     run_rows = []
     for job in tqdm(jobs, desc="Split jobs", unit="job"):

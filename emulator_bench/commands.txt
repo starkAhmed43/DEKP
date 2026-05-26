@@ -1,12 +1,21 @@
 python emulator_bench/cache_embeddings.py \
-  --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
-  --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
-  --dataset_df_path ~/github/EMULaToR/data/processed/baselines/DEKP/km_kinetic_params_3d_aligned.parquet \
+  --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP_Kcat \
+  --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP_Kcat/embeddings \
+  --dataset_df_path ~/github/EMULaToR/data/processed/baselines/DEKP_Kcat/kcat_kinetic_params_3d_aligned.parquet \
   --feature_list trfm,t5 \
   --experimental_pdb_dir ~/github/EMULaToR/data/intermediate/processed_exp_pdb \
   --alphafold_pdb_dir ~/github/EMULaToR/data/intermediate/alphafold \
   --esm3_pdb_dir ~/github/EMULaToR/data/intermediate/esm \
   --device cuda:0
+
+python emulator_bench/prepare_splits.py \
+  --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP_Kcat \
+  --manifests_dir ~/github/EMULaToR/data/processed/baselines/DEKP_Kcat/dekp_manifests \
+  --split_groups enzyme_structure_splits conformer_cosine_splits enzyme_sequence_splits substrate_splits random_splits_grouped_sequence random_splits_grouped_smiles uniprot_time_splits \
+  --experimental_pdb_dir ~/github/EMULaToR/data/intermediate/processed_exp_pdb \
+  --alphafold_pdb_dir ~/github/EMULaToR/data/intermediate/alphafold \
+  --esm_pdb_dir ~/github/EMULaToR/data/intermediate/esm \
+  --overwrite
 
 python emulator_bench/train_single_target_tvt.py \
   --train_path ~/github/EMULaToR/data/processed/baselines/DEKP/random_splits_grouped_sequence/train.parquet \
@@ -94,10 +103,10 @@ python emulator_bench/launch_parallel_retrain_from_optuna.py \
 python emulator_bench/launch_parallel_retrain_from_optuna.py \
   --gpus 0 \
   --trials_per_gpu 2 \
-  --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP \
-  --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP/embeddings \
+  --base_dir ~/github/EMULaToR/data/processed/baselines/DEKP_Kcat \
+  --manifests_dir ~/github/EMULaToR/data/processed/baselines/DEKP_Kcat/dekp_manifests \
+  --cache_dir ~/github/EMULaToR/data/processed/baselines/DEKP_Kcat/embeddings \
   --config_json emulator_bench/configs/fine_tune_defaults.json \
-  --split_groups random_splits_grouped_smiles \
   --hparams_json emulator_bench/configs/fine_tune_defaults.json \
   --seeds 666 777 888  \
   --num_workers 8 \

@@ -25,6 +25,7 @@ from emulator_bench.common import (
     DEFAULT_CACHE_DIR,
     DEFAULT_FEATURES,
     DEFAULT_SPLIT_GROUPS,
+    apply_manifest_paths_to_jobs,
     canonical_pdb_identity,
     discover_split_jobs,
     find_first_existing_column,
@@ -151,6 +152,7 @@ def _iter_unique_rows_from_frame(frame: pd.DataFrame, column_names: dict):
     pdb_type_col = column_names.get("pdb_type_col")
     pdb_source_col = column_names.get("pdb_source_col")
     pdb_record_col = column_names.get("pdb_record_col")
+    structure_path_col = column_names.get("structure_path_col")
 
     working = pd.DataFrame(index=frame.index)
     working["sequence"] = _normalize_series(frame[sequence_col]).map(normalize_sequence)
@@ -188,6 +190,11 @@ def _iter_unique_rows_from_frame(frame: pd.DataFrame, column_names: dict):
     else:
         working["pdb_record"] = working["structure_id"]
 
+    if structure_path_col and structure_path_col in frame.columns:
+        working["structure_path"] = _normalize_series(frame[structure_path_col])
+    else:
+        working["structure_path"] = ""
+
     working["pdb_key"] = working["pdb_record"].where(working["pdb_record"] != "", working["structure_id"])
     working = working[working["sequence"] != ""].copy()
     working = working[working["smiles"] != ""].copy()
@@ -200,7 +207,7 @@ def _iter_unique_rows_from_frame(frame: pd.DataFrame, column_names: dict):
     unique_smiles = working.drop_duplicates(subset=["smiles"], keep="first")[["smiles", "cid"]].to_dict("records")
     unique_structures = (
         working.drop_duplicates(subset=["pdb_key"], keep="first")[
-            ["pdb_key", "sequence", "protein_id", "pdb_type", "pdb_source", "pdb_record", "structure_id"]
+            ["pdb_key", "sequence", "protein_id", "pdb_type", "pdb_source", "pdb_record", "structure_id", "structure_path"]
         ]
         .to_dict("records")
     )
@@ -229,6 +236,7 @@ def _iter_unique_rows_from_frame(frame: pd.DataFrame, column_names: dict):
             "pdb_source": entry["pdb_source"],
             "pdb_record": entry["pdb_record"] or entry["structure_id"] or entry["pdb_key"],
             "original_structure_id": entry["structure_id"] or entry["pdb_record"] or entry["pdb_key"],
+            "structure_path": entry.get("structure_path") or "",
         }
         for entry in unique_structures
     }
@@ -250,6 +258,7 @@ def _scan_split_file(payload: dict) -> dict:
     pdb_type_col = payload["column_names"]["pdb_type_col"]
     pdb_source_col = payload["column_names"]["pdb_source_col"]
     pdb_record_col = payload["column_names"]["pdb_record_col"]
+    structure_path_col = payload["column_names"].get("structure_path_col")
 
     unique_sequences = {}
     unique_smiles = {}
@@ -274,6 +283,9 @@ def _scan_split_file(payload: dict) -> dict:
         pdb_record = None
         if pdb_record_col and pdb_record_col in row.index:
             pdb_record = row[pdb_record_col]
+        structure_path = ""
+        if structure_path_col and structure_path_col in row.index:
+            structure_path = str(row[structure_path_col]).strip()
         pdb_identity = canonical_pdb_identity(pdb_type, pdb_source, pdb_record, structure_id, protein_id)
 
         if sequence not in unique_sequences:
@@ -297,6 +309,7 @@ def _scan_split_file(payload: dict) -> dict:
                 "pdb_source": pdb_source,
                 "pdb_record": pdb_record,
                 "original_structure_id": structure_id,
+                "structure_path": structure_path,
             }
 
         max_protein_len = max(max_protein_len, len(sequence) + 2)
@@ -316,6 +329,12 @@ def _scan_split_file(payload: dict) -> dict:
 
 
 def _resolve_pdb_path(entry: dict, args) -> Path | None:
+    structure_path = str(entry.get("structure_path") or "").strip()
+    if structure_path:
+        path = Path(structure_path).expanduser()
+        if path.exists():
+            return path
+
     pdb_indexes = getattr(args, "_pdb_indexes", None)
     pdb_record_id = str(entry.get("pdb_record") or entry.get("structure_id") or entry.get("protein_id") or "").strip()
     pdb_type = str(entry.get("pdb_type") or "").strip().lower()
@@ -497,6 +516,7 @@ def _resolve_columns(frame, args):
         "pdb_type_col": args.pdb_type_col if args.pdb_type_col and args.pdb_type_col in frame.columns else ("pdb_type" if "pdb_type" in frame.columns else None),
         "pdb_source_col": args.pdb_source_col if args.pdb_source_col and args.pdb_source_col in frame.columns else ("pdb_source" if "pdb_source" in frame.columns else None),
         "pdb_record_col": args.pdb_record_col if args.pdb_record_col and args.pdb_record_col in frame.columns else ("pdbs" if "pdbs" in frame.columns else None),
+        "structure_path_col": "structure_path" if "structure_path" in frame.columns else None,
     }
 
 
@@ -857,6 +877,7 @@ def main():
     parser = argparse.ArgumentParser(description="Build reusable DEKP caches for EMULaToR split retraining.")
     parser.add_argument("--base_dir", type=str, default=str(DEFAULT_BASE_DIR))
     parser.add_argument("--cache_dir", type=str, default=str(DEFAULT_CACHE_DIR))
+    parser.add_argument("--manifests_dir", type=str, default=None)
     parser.add_argument("--dataset_df_path", type=str, default=str(DEFAULT_DATASET_DF_PATH))
     parser.add_argument("--split_groups", nargs="+", default=DEFAULT_SPLIT_GROUPS)
     parser.add_argument("--threshold", type=str, default=None)
@@ -899,6 +920,7 @@ def main():
 
     args.base_dir = Path(args.base_dir).expanduser()
     args.cache_dir = Path(args.cache_dir).expanduser()
+    args.manifests_dir = Path(args.manifests_dir).expanduser() if args.manifests_dir else None
     args.thresholds = normalize_threshold_args(args.thresholds, args.threshold)
     args.feature_list = [item.strip() for item in args.feature_list.split(",") if item.strip()]
     args.graph_device = args.graph_device or args.device
@@ -921,7 +943,8 @@ def main():
 
     dataset_df_path = Path(args.dataset_df_path).expanduser()
     jobs = []
-    use_full_dataset = dataset_df_path.exists()
+    use_manifests = args.manifests_dir is not None
+    use_full_dataset = dataset_df_path.exists() and not use_manifests
     if use_full_dataset:
         _log(f"Loading full dataset dataframe from {dataset_df_path}", args.verbose)
         frame = pd.read_parquet(dataset_df_path, columns=["sequence", "smiles", "pdbs", "pdb_type", "pdb_source"])
@@ -935,11 +958,15 @@ def main():
             "pdb_type_col": "pdb_type" if "pdb_type" in frame.columns else None,
             "pdb_source_col": "pdb_source" if "pdb_source" in frame.columns else None,
             "pdb_record_col": "pdbs" if "pdbs" in frame.columns else None,
+            "structure_path_col": None,
         }
     else:
         jobs = discover_split_jobs(args.base_dir, split_groups=args.split_groups, thresholds=args.thresholds)
         if not jobs:
             raise FileNotFoundError(f"No split jobs discovered in {args.base_dir} and no dataset_df_path found at {dataset_df_path}")
+        if use_manifests:
+            jobs = apply_manifest_paths_to_jobs(jobs, args.manifests_dir, require=True)
+            _log(f"Using prepared manifests from {args.manifests_dir}", args.verbose)
         _log(f"Discovered {len(jobs)} split jobs in {args.base_dir} for groups={args.split_groups} and thresholds={args.thresholds}", args.verbose)
         sample_frame = read_table(Path(jobs[0]["train_path"]))
         _log(f"Sample frame columns: {sample_frame.columns.tolist()}", args.verbose)
@@ -947,7 +974,7 @@ def main():
         if column_names["protein_id_col"] is None:
             column_names["protein_id_col"] = column_names["sequence_col"]
         if column_names["structure_id_col"] is None:
-            column_names["structure_id_col"] = column_names["protein_id_col"]
+            column_names["structure_id_col"] = column_names["pdb_record_col"] or column_names["protein_id_col"]
         _log(f"Resolved column names: {column_names}", args.verbose)
 
     started = time.time()
