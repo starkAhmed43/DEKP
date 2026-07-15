@@ -5,7 +5,13 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-from tqdm.auto import tqdm
+try:
+    from src.utils.rich_progress import progress, write
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from src.utils.rich_progress import progress, write
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -228,7 +234,7 @@ def main():
         jobs = apply_manifest_paths_to_jobs(jobs, Path(args.manifests_dir).expanduser(), require=True)
 
     run_rows = []
-    for job in tqdm(jobs, desc="Split jobs", unit="job"):
+    for job in progress(jobs, desc="Split jobs", unit="job"):
         for seed in args.seeds:
             result_root = _run_training(job, seed, args, hparams)
             metrics = pd.read_csv(result_root / "final_results_test.csv").iloc[0].to_dict()

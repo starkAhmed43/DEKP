@@ -10,7 +10,13 @@ import pandas as pd
 from Bio.Align import PairwiseAligner
 from Bio.PDB import PDBParser, is_aa
 from Bio.SeqUtils import seq1
-from tqdm.auto import tqdm
+try:
+    from src.utils.rich_progress import progress, write
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from src.utils.rich_progress import progress, write
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -322,7 +328,7 @@ def prepare_one_split(path: Path, output_path: Path, candidates: Dict[str, List[
         frame = frame.head(args.limit_rows).copy()
     rows = []
     failed = 0
-    for row in tqdm(frame.to_dict("records"), desc=f"Preparing {path.parent.name}/{path.name}", unit="row"):
+    for row in progress(frame.to_dict("records"), desc=f"Preparing {path.parent.name}/{path.name}", unit="row"):
         exact_candidates = candidates.get(_row_key(row), [])
         sequence_candidates = candidates.get("sequence:" + stable_hash(normalize_sequence(row.get("sequence", ""))), [])
         candidate_groups = [exact_candidates]

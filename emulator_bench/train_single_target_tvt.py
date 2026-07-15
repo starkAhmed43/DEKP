@@ -10,7 +10,13 @@ import pandas as pd
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
+try:
+    from src.utils.rich_progress import progress, write
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from src.utils.rich_progress import progress, write
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -425,13 +431,13 @@ def main():
     started = time.time()
     log_path = out_dir / "logfile.csv"
 
-    with tqdm(total=args.epochs, desc="Training", unit="epoch", leave=True) as epoch_bar:
+    with progress(total=args.epochs, desc="Training", unit="epoch", leave=True) as epoch_bar:
         for epoch in range(1, args.epochs + 1):
             model.train()
             train_loss_sum = 0.0
             train_examples = 0
             batch_count = 0
-            iterator = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", unit="batch", leave=False)
+            iterator = progress(train_loader, desc=f"Epoch {epoch}/{args.epochs}", unit="batch", leave=False)
             for graph_batch, protein_tokens, smiles_tokens, features, labels, _ in iterator:
                 graph_batch, protein_tokens, smiles_tokens, features, labels = _move_batch(
                     graph_batch, protein_tokens, smiles_tokens, features, labels, device

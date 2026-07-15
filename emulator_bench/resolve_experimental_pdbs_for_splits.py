@@ -14,7 +14,13 @@ import pandas as pd
 from Bio.Align import PairwiseAligner
 from Bio.PDB import PDBParser, is_aa
 from Bio.SeqUtils import seq1
-from tqdm.auto import tqdm
+try:
+    from src.utils.rich_progress import progress, write
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from src.utils.rich_progress import progress, write
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -176,7 +182,7 @@ def _prefill_pdb_sequence_cache(
     n_threads = min(num_threads, len(needed))
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
         futures = {executor.submit(_parse_one, pid): pid for pid in needed}
-        for future in tqdm(
+        for future in progress(
             concurrent.futures.as_completed(futures),
             total=len(futures),
             desc="Pre-parsing PDB sequences",
@@ -399,7 +405,7 @@ def _rewrite_split_file(
         _prefill_pdb_sequence_cache(pending_tasks, experimental_index, pdb_sequence_cache, num_threads=min(args.num_workers, 16))
         # Populate globals in parent; forked workers inherit them instantly.
         _init_worker(experimental_index, pdb_sequence_cache, args.identity_threshold)
-        iterator = tqdm(total=len(pending_tasks), desc=f"Resolving {path.relative_to(base_dir)}", unit="task", leave=True)
+        iterator = progress(total=len(pending_tasks), desc=f"Resolving {path.relative_to(base_dir)}", unit="task", leave=True)
         if args.num_workers > 1:
             ctx = mp.get_context("fork")
             with ctx.Pool(processes=args.num_workers) as pool:
