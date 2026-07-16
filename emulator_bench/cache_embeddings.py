@@ -9,7 +9,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from tqdm.auto import tqdm
+try:
+    from src.utils.rich_progress import progress, write
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from src.utils.rich_progress import progress, write
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -495,7 +501,7 @@ def _iter_unique_rows(jobs, column_names):
     _log(f"Scanning {len(tasks)} split files with up to {max_workers} worker processes", True)
     with ProcessPoolExecutor(max_workers=max_workers) as pool:
         futures = [pool.submit(_scan_split_file, payload) for payload in tasks]
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Scanning split files", unit="file"):
+        for future in progress(as_completed(futures), total=len(futures), desc="Scanning split files", unit="file"):
             result = future.result()
             unique_sequences.update(result["unique_sequences"])
             unique_smiles.update(result["unique_smiles"])
@@ -582,7 +588,7 @@ def _save_protein_payloads(unique_sequences, cache_dir: Path, protein_tokenizer:
         _log(f"ProtT5 phase: {len(sequences)} sequences require direct computation", args.verbose)
         _log("ProtT5 phase: precomputing protein token ids", args.verbose)
         token_id_lookup = {}
-        for item in tqdm(pending_t5, desc="Encoding protein tokens", unit="seq"):
+        for item in progress(pending_t5, desc="Encoding protein tokens", unit="seq"):
             token_id_lookup[item["sequence"]] = torch.tensor(
                 protein_tokenizer.encode(item["sequence"], max_length=args.protein_max_len, add_special_tokens=True),
                 dtype=torch.long,
@@ -595,7 +601,7 @@ def _save_protein_payloads(unique_sequences, cache_dir: Path, protein_tokenizer:
         )
         _log(f"ProtT5 phase: {len(batches)} batches", args.verbose)
         batch_lookup = {item["sequence"]: item for item in pending_t5}
-        for batch in tqdm(batches, desc="Caching ProtT5", unit="batch"):
+        for batch in progress(batches, desc="Caching ProtT5", unit="batch"):
             embedded = embed_prot_t5_batch(model, tokenizer, batch, device)
             for sequence in batch:
                 item = batch_lookup[sequence]
@@ -719,7 +725,7 @@ def _save_ligand_payloads(unique_smiles, cache_dir: Path, smiles_tokenizer: Rege
         )
         smiles_values = list(pending_trfm)
         _log(f"SMILES Transformer phase: {len(smiles_values)} SMILES require direct computation", args.verbose)
-        for start in tqdm(range(0, len(smiles_values), args.trfm_batch_size), desc="Caching TRFM", unit="batch"):
+        for start in progress(range(0, len(smiles_values), args.trfm_batch_size), desc="Caching TRFM", unit="batch"):
             batch_smiles = smiles_values[start : start + args.trfm_batch_size]
             embedded = embed_smiles_trfm_batch(batch_smiles, model=model, vocab=vocab, device=device)
             for smiles in batch_smiles:
@@ -759,7 +765,7 @@ def _save_structure_payloads(unique_structures, cache_dir: Path, args, legacy):
     existing_structure_cache = set() if args.overwrite else _build_existing_structure_cache_index(cache_dir)
     _log(f"Structure cache: {len(unique_structures)} unique PDB structures", args.verbose)
     graph_tasks = []
-    for entry in tqdm(unique_structures.values(), desc="Resolving structures", unit="structure"):
+    for entry in progress(unique_structures.values(), desc="Resolving structures", unit="structure"):
         path = structure_cache_path(cache_dir, structure_id=entry["structure_id"], fallback_sequence=entry["sequence"])
         if not args.overwrite and str(path) in existing_structure_cache:
             if (
@@ -821,7 +827,7 @@ def _save_structure_payloads(unique_structures, cache_dir: Path, args, legacy):
                         pending[future] = task
 
                 submit_until_full()
-                with tqdm(total=len(graph_tasks), desc="Building structure graphs", unit="structure") as progress:
+                with progress(total=len(graph_tasks), desc="Building structure graphs", unit="structure") as progress:
                     while pending:
                         future = next(as_completed(list(pending.keys())))
                         task = pending.pop(future)
@@ -856,7 +862,7 @@ def _save_structure_payloads(unique_structures, cache_dir: Path, args, legacy):
                 for task in graph_tasks:
                     future = pool.submit(_build_graph_worker, task)
                     futures[future] = task
-                for future in tqdm(as_completed(futures), total=len(futures), desc="Building structure graphs", unit="structure"):
+                for future in progress(as_completed(futures), total=len(futures), desc="Building structure graphs", unit="structure"):
                     task = futures[future]
                     try:
                         result = future.result()
